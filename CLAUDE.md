@@ -20,7 +20,7 @@ repository.yaml                 add-on repository manifest (for adding the GitHu
 README.md                       GitHub landing page with install steps
 version_tracker/
   config.yaml                   add-on manifest: ingress on 8099, services mqtt:want, options/schema
-  Dockerfile                    default HA base image + python3 + paho-mqtt 2.x (pip)
+  Dockerfile                    HA base image (BUILD_FROM, default base:3.24) + python3 + paho-mqtt 2.x
   run.sh                        bashio: reads Mosquitto credentials, execs app.py
   translations/en.yaml          labels for the Configuration tab
   DOCS.md / README.md / CHANGELOG.md
@@ -96,7 +96,10 @@ Tested so far, in a sandbox without network access:
 
 Tested with Docker on an arm64 Mac (2026-11-04):
 
-- **Image:** built from `ghcr.io/home-assistant/aarch64-base:latest` and run
+- **Image:** newer Supervisors don't pass `BUILD_FROM` (install failed with
+  "base name ($BUILD_FROM) should not be blank"), so the Dockerfile defaults
+  to the multi-arch `ghcr.io/home-assistant/base:3.24`. Built with no build
+  args for amd64 and arm64 (1.0.1). Earlier built from `aarch64-base` and run
   with its real `/init` + `run.sh`. A mock Supervisor answered
   `/services/mqtt`, and `bashio::services mqtt` handed the credentials over.
   Note: s6 `/init` drops `docker run -e` variables for the CMD, so to run the
@@ -114,7 +117,6 @@ Tested with Docker on an arm64 Mac (2026-11-04):
 **Not yet tested for real:**
 - installing through the Supervisor on a real HA OS / Supervised system
   (ingress panel, Configuration tab, real `/services/mqtt`)
-- amd64 image build
 - self-hosted GitLab and GitLab tokens
 - vt-agent on a real Proxmox host (pve-manager detection), and Docker
   container reporting

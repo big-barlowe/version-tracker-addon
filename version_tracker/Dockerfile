@@ -1,4 +1,6 @@
-ARG BUILD_FROM
+# Newer Supervisors no longer pass BUILD_FROM, so default to the multi-arch
+# Home Assistant base image (amd64 + aarch64). A passed BUILD_FROM still wins.
+ARG BUILD_FROM=ghcr.io/home-assistant/base:3.24
 FROM $BUILD_FROM
 
 RUN apk add --no-cache python3 py3-pip \

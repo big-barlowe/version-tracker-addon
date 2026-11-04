@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.1
+
+- Re-running the install script now adds any settings your
+  `/etc/version-tracker.conf` doesn't have yet (such as `PACKAGES`) at the
+  end, commented out, with a line on how to use each. Your own settings are
+  left as they are.
+
 ## 1.4.0
 
 - Report chosen apt packages as their own items with the new `PACKAGES`

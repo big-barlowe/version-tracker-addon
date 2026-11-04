@@ -85,6 +85,9 @@ version_tracker/
 - **Machine setup:** the login machines use (broker, port, user, password)
   is saved from the GUI to `/data/settings.json` (mode 600). `agent_conf()`
   and `installer()` build the settings file and `vt-install.sh` from it.
+  On an existing settings file, the installer appends (commented out) each
+  template section whose keys the file doesn't mention, so new options in
+  version-tracker.conf.example reach old machines.
   The GUI wraps the installer in a heredoc that writes it to a file before
   running it, so its questions read the keyboard, not the rest of the paste.
   If a host port is set for 8098/tcp under Network, a second listener serves

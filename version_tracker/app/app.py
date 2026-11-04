@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("VT_DATA_DIR", "/data")
 OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")

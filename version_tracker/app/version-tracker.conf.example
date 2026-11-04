@@ -17,17 +17,18 @@ MQTT_PASS="your-mqtt-password"
 REFRESH_HOURS=6
 
 # Report running Docker containers: auto (when Docker is installed), or 0 to turn off.
+# Per container, labels can set version_tracker.url, version_tracker.name,
+# or version_tracker.ignore=true.
 DOCKER=auto
 
-# Packages to show as their own items, as "package" or "package|Name".
-# The latest version comes from apt, so it works for anything in this
-# machine's repositories.
+# Packages to show as their own items: "package-name" or "package-name|Display Name".
+# Installed version from dpkg, latest from apt (this machine's repositories).
 #PACKAGES=(
 #  "proxmox-backup-server|Proxmox Backup Server"
 #)
 
-# Other apps on this machine, as "Name|installed version|GitHub or GitLab link".
-# The add-on looks up the latest release for you.
+# Other apps: "Display Name|installed version|GitHub or GitLab link".
+# Use a command for the version so it stays current; the add-on looks up the latest release.
 #APPS=(
 #  "Jellyfin|$(jellyfin --version 2>/dev/null | awk '{print $NF}')|https://github.com/jellyfin/jellyfin"
 #)

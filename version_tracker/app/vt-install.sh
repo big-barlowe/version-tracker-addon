@@ -8,7 +8,8 @@
 #   VT_NAME=pve1 VT_SCHEDULE=yes bash vt-install.sh
 #
 # Running it again updates the agent and the login, and keeps your other
-# settings (APPS, PICTURE, ...) in /etc/version-tracker.conf.
+# settings (APPS, PICTURE, ...) in /etc/version-tracker.conf. Settings that
+# newer versions added are appended there, commented out, with how to use them.
 
 set -eu
 export LC_ALL=C
@@ -69,16 +70,40 @@ apply() {
     END { for (i = 1; i <= m; i++) if (!(order[i] in done)) print line[order[i]] }'
 }
 
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+# Prints the sections of the template (comment lines plus a setting, up to a
+# blank line) whose settings the file doesn't mention, set or commented out.
+missing() {  # missing <file> <template>
+  awk '
+    function key(s) { if (!match(s, /^#?[A-Z_]+=/)) return ""; s = substr(s, 1, RLENGTH - 1); sub(/^#/, "", s); return s }
+    function flush(   i, k, show) {
+      show = 0
+      for (i = 1; i <= n; i++) if ((k = key(blk[i])) != "") { if (k in have) { n = 0; return } show = 1 }
+      if (show) {
+        if (!added++) print "\n# --- Added by vt-install: settings you can use (remove the # to turn one on) ---"
+        print ""; for (i = 1; i <= n; i++) print (blk[i] ~ /^[A-Z_]+=/ ? "#" : "") blk[i]
+      }
+      n = 0
+    }
+    FNR == NR { if ((k = key($0)) != "") have[k] = 1; next }
+    /^[ \t]*$/ { flush(); next }
+    { blk[++n] = $0 }
+    END { flush() }' "$1" "$2"
+}
+
+tmp="$(mktemp)"; tmpl="$(mktemp)"
+trap 'rm -f "$tmp" "$tmpl"' EXIT
+cat > "$tmpl" <<'VT_CONF_EOF'
+@CONF@
+VT_CONF_EOF
 if [ -r "$CONF" ]; then
   cp -p "$CONF" "$CONF.bak"
   apply < "$CONF" > "$tmp"
+  new="$(missing "$tmp" "$tmpl")"
+  [ -z "$new" ] || printf '%s\n' "$new" >> "$tmp"
   say "Updated $CONF (the old one is in $CONF.bak)"
+  [ -z "$new" ] || say "  added new settings, commented out, at the end of it"
 else
-  apply > "$tmp" <<'VT_CONF_EOF'
-@CONF@
-VT_CONF_EOF
+  apply < "$tmpl" > "$tmp"
   say "Wrote $CONF"
 fi
 install -m 600 "$tmp" "$CONF"

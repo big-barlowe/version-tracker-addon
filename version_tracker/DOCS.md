@@ -150,7 +150,10 @@ The script refreshes the package lists itself, at most every `REFRESH_HOURS`
 
 When a new version of the app changes the agent, machines running the old
 one show **Agent out of date** on the page. Run the install script (or
-one-line command) on them again; it keeps the name and settings.
+one-line command) on them again; it keeps the name and settings. Settings
+that newer versions added are appended to `/etc/version-tracker.conf`,
+commented out, with a short note on how to use each; remove the `#` to turn
+one on.
 
 ### Machines that stop reporting
 

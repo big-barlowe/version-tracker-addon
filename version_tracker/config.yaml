@@ -1,5 +1,5 @@
 name: Version Tracker
-version: "1.4.0"
+version: "1.4.1"
 slug: version_tracker
 description: Shows new GitHub/GitLab releases and machines that need updates in Settings → Updates
 arch:

@@ -72,6 +72,7 @@
   .icon:hover { background: var(--chip); color: var(--text); }
   .icon svg { width: 18px; height: 18px; fill: currentColor; }
   .empty { padding: 40px 16px; text-align: center; color: var(--muted); }
+  .note { margin: 0 0 12px; color: var(--muted); }
   .banner { border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--warn-bg); color: var(--warn); }
 
   dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; background: var(--card); color: var(--text);
@@ -80,6 +81,13 @@
   dialog::backdrop { background: rgba(0,0,0,.4); }
   .dlg-body { padding: 20px; overflow: auto; }
   .dlg-body h2 { margin: 0 0 4px; font-size: 18px; font-weight: 500; }
+  .dlg-body h3 { margin: 22px 0 2px; font-size: 15px; font-weight: 500; }
+  .dlg-body p { margin: 6px 0 0; }
+  .conn { display: grid; grid-template-columns: 3fr 1fr; gap: 0 12px; }
+  .conn .full { grid-column: 1 / -1; }
+  .conn-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+  .conn-foot .form-error { margin: 0; }
+  @media (max-width: 520px) { .conn { grid-template-columns: 1fr; } .conn .spacer { display: none; } }
   .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); }
   label { display: block; margin-top: 14px; font-weight: 500; }
   label .hint { font-weight: 400; color: var(--muted); font-size: 12px; display: block; }
@@ -94,6 +102,10 @@
         font: 12px/1.5 var(--mono); overflow: auto; max-height: 260px; white-space: pre; }
   .codebar { display: flex; gap: 6px; margin-top: 6px; }
   .codebar button, .codebar a { font-size: 12px; padding: 4px 10px; }
+  .codebar button.primary { padding: 6px 14px; font-size: 13px; }
+  pre.short { max-height: 120px; }
+  details.manual { margin-top: 22px; }
+  details.manual > summary { font-size: 14px; color: var(--text); }
   .codebar a { border: 1px solid var(--line); border-radius: 8px; color: var(--text); }
   .status-line { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
@@ -132,6 +144,7 @@
 
   <div id="banner" class="banner" hidden></div>
   <nav class="tabs" id="tabs" aria-label="Filter"></nav>
+  <p class="note" id="ignored-note" hidden>Ignored items are hidden from the other tabs and from Home Assistant. Use <b>Track again</b> to bring one back.</p>
 
   <div class="card">
     <table>
@@ -165,7 +178,7 @@
         <span class="hint">Only used without a project link, e.g. for router firmware.</span>
         <input name="latest" autocomplete="off" placeholder="1.2.3">
       </label>
-      <label>Picture link <span class="hint">Optional. Shown in Home Assistant, e.g. a dashboard-icons link.</span>
+      <label>Picture link <span class="hint">Optional. Leave blank to use the logo from the project's README.</span>
         <input name="picture" autocomplete="off" placeholder="https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/jellyfin.webp">
       </label>
       <div class="form-error" id="entry-error"></div>
@@ -180,22 +193,53 @@
 <dialog id="dlg-machine" class="wide">
   <div class="dlg-body">
     <h2>Add a machine</h2>
-    <p class="muted" style="margin:0">Machines report themselves over MQTT. There's nothing to add here or in configuration.yaml — a machine appears as soon as it reports.</p>
+    <p class="muted">Debian, Ubuntu and Proxmox VE machines report themselves over MQTT. There's nothing to add here or in configuration.yaml — a machine appears as soon as it reports.</p>
     <div class="status-line"><span class="dot" id="mqtt-dot"></span><span id="mqtt-text">Checking MQTT…</span></div>
-    <ol class="steps">
-      <li>On the machine, install the MQTT client:
-        <pre>apt install -y mosquitto-clients</pre></li>
-      <li>Save the agent as <code>/usr/local/bin/vt-agent</code>, then run <code>chmod +x /usr/local/bin/vt-agent</code>.
-        <pre id="agent-code">Loading…</pre>
-        <div class="codebar"><button type="button" data-copy="agent-code">Copy</button><a href="api/agent" download="vt-agent">Download</a></div></li>
-      <li>Create <code>/etc/version-tracker.conf</code> with your broker details, then run <code>chmod 600 /etc/version-tracker.conf</code>.
-        <pre id="conf-code">Loading…</pre>
-        <div class="codebar"><button type="button" data-copy="conf-code">Copy</button></div></li>
-      <li>Run <code>vt-agent</code> once. The machine shows up here within a few seconds.</li>
-      <li>Schedule it to run every hour:
-        <pre id="cron-code">echo '17 * * * * root /usr/local/bin/vt-agent &gt;/dev/null 2&gt;&amp;1' &gt; /etc/cron.d/version-tracker</pre>
-        <div class="codebar"><button type="button" data-copy="cron-code">Copy</button></div></li>
-    </ol>
+
+    <h3>1. MQTT login for your machines</h3>
+    <p class="muted">Saved here and built into the install script. With the Mosquitto broker app, any Home Assistant user works (e.g. a user named <code>vt-agent</code> under Settings → People), or add a login in the Mosquitto broker app's configuration.</p>
+    <form id="conn-form" class="conn" autocomplete="off">
+      <label>Broker address <span class="hint">Usually Home Assistant's IP address.</span>
+        <input name="broker" required placeholder="192.168.1.10"></label>
+      <label>Port <span class="hint spacer">&nbsp;</span>
+        <input name="port" inputmode="numeric" placeholder="1883"></label>
+      <label>Username <input name="username" autocomplete="off"></label>
+      <label>Password <input name="password" type="password" autocomplete="new-password"></label>
+      <div class="conn-foot full"><button type="submit" class="primary" id="conn-save">Save login</button><div class="form-error" id="conn-error"></div></div>
+    </form>
+
+    <h3>2. Install on the machine</h3>
+    <p id="install-locked" class="muted">Save the login above first.</p>
+    <div id="install-wrap" hidden>
+      <p>Open a root shell on the machine (on Proxmox, the node's <b>Shell</b>), paste this and press Enter. It installs the agent, asks what to call the machine and whether to report every hour, and sends the first report.</p>
+      <pre id="install-code" class="short">Loading…</pre>
+      <div class="codebar"><button type="button" class="primary" data-copy="install-code">Copy install script</button></div>
+      <div id="oneliner" hidden>
+        <p style="margin-top:14px">Or download it from Home Assistant with one line:</p>
+        <pre id="oneliner-code"></pre>
+        <div class="codebar"><button type="button" data-copy="oneliner-code">Copy</button><button type="button" id="new-link">New link</button></div>
+        <p class="muted" style="font-size:12px">The link contains your MQTT login, so treat it like a password; <b>New link</b> stops the old one working. No <code>curl</code>? Use <code>wget -qO- … | bash</code>. Not root? End it with <code>| sudo bash</code>.</p>
+      </div>
+      <p id="oneliner-off" class="muted" style="font-size:12px;margin-top:10px">Prefer a one-line <code>curl</code> command? In the app's Configuration tab, set a port for <b>Machine installer</b> under Network, then restart the app.</p>
+    </div>
+
+    <details class="manual">
+      <summary>Set it up by hand instead</summary>
+      <ol class="steps">
+        <li>On the machine, install the MQTT client:
+          <pre>apt install -y mosquitto-clients</pre></li>
+        <li>Save the agent as <code>/usr/local/bin/vt-agent</code>, then run <code>chmod +x /usr/local/bin/vt-agent</code>.
+          <pre id="agent-code">Loading…</pre>
+          <div class="codebar"><button type="button" data-copy="agent-code">Copy</button><a href="api/agent" download="vt-agent">Download</a></div></li>
+        <li>Create <code>/etc/version-tracker.conf</code>, then run <code>chmod 600 /etc/version-tracker.conf</code>.
+          <pre id="conf-code">Loading…</pre>
+          <div class="codebar"><button type="button" data-copy="conf-code">Copy</button></div></li>
+        <li>Run <code>vt-agent</code> once. The machine shows up here within a few seconds.</li>
+        <li>Schedule it to run every hour:
+          <pre id="cron-code">echo '17 * * * * root /usr/local/bin/vt-agent &gt;/dev/null 2&gt;&amp;1' &gt; /etc/cron.d/version-tracker</pre>
+          <div class="codebar"><button type="button" data-copy="cron-code">Copy</button></div></li>
+      </ol>
+    </details>
     <p class="muted" id="stale-note"></p>
   </div>
   <div class="dlg-foot"><button type="button" data-close>Close</button></div>
@@ -214,7 +258,9 @@ const ICONS = {
   edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
   check: 'M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z',
   done: 'M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z',
-  del: 'M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'
+  del: 'M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z',
+  hide: 'M12 7a5 5 0 0 1 5 5c0 .65-.13 1.26-.36 1.83l2.92 2.92A11.82 11.82 0 0 0 23 12c-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46A11.8 11.8 0 0 0 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65a3 3 0 0 0 3 3c.22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53a5 5 0 0 1-5-5c0-.79.2-1.53.53-2.2zm4.31-.78 3.15 3.15.02-.16a3 3 0 0 0-3-3l-.17.01z',
+  show: 'M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z'
 };
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -245,6 +291,8 @@ function ago(iso) {
 const day = iso => iso ? new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
 
 function matches(e, f = state.filter) {
+  if (f === 'ignored') return e.ignored;
+  if (e.ignored) return false;
   if (f === 'updates') return NEEDS_ATTENTION.has(e.status);
   if (f === 'machines') return e.source === 'mqtt';
   if (f === 'projects') return e.source === 'project';
@@ -254,6 +302,7 @@ function matches(e, f = state.filter) {
 function renderTabs() {
   const n = f => state.entries.filter(e => matches(e, f)).length;
   const tabs = [['all', 'All'], ['updates', 'Needs attention'], ['machines', 'Machines'], ['projects', 'Projects']];
+  if (n('ignored')) tabs.push(['ignored', 'Ignored']);
   $('#tabs').innerHTML = tabs.map(([k, label]) =>
     `<button data-filter="${k}" aria-pressed="${state.filter === k}">${label}<span class="n">${n(k)}</span></button>`).join('');
 }
@@ -286,6 +335,8 @@ function row(e) {
   if (e.source === 'project' && e.status === 'Update available' && e.latest) acts.push(icon('done', 'Mark as updated', 'mark', e.id));
   if (e.url) acts.push(icon('check', 'Check now', 'check', e.id));
   if (e.source === 'project') acts.push(icon('edit', 'Edit', 'edit', e.id));
+  acts.push(e.ignored ? icon('show', 'Track again', 'unignore', e.id)
+                      : icon('hide', 'Ignore (hide here and in Home Assistant)', 'ignore', e.id));
   acts.push(icon('del', e.source === 'mqtt' ? 'Remove (returns if the machine reports again)' : 'Delete', 'delete', e.id));
 
   return `<tr>
@@ -302,13 +353,17 @@ function row(e) {
 }
 
 function render() {
-  const all = state.entries;
+  const all = state.entries.filter(e => !e.ignored);
+  const ignored = state.entries.length - all.length;
+  if (state.filter === 'ignored' && !ignored) state.filter = 'all';
+  $('#ignored-note').hidden = state.filter !== 'ignored';
   const upd = all.filter(e => e.status === 'Update available').length;
   const stale = all.filter(e => e.status === 'Not reporting').length;
   const errs = all.filter(e => e.status === 'Error').length;
   const parts = [`${all.length} tracked`, `${upd} update${upd === 1 ? '' : 's'} available`];
   if (stale) parts.push(`${stale} not reporting`);
   if (errs) parts.push(`${errs} with errors`);
+  if (ignored) parts.push(`${ignored} ignored`);
   $('#summary').textContent = parts.join(' · ');
 
   const banner = $('#banner');
@@ -318,7 +373,7 @@ function render() {
   } else banner.hidden = true;
 
   renderTabs();
-  const list = all.filter(e => matches(e)).sort((a, b) =>
+  const list = state.entries.filter(e => matches(e)).sort((a, b) =>
     (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9) ||
     (a.machine || '~').localeCompare(b.machine || '~') ||
     (a.name || '').localeCompare(b.name || ''));
@@ -352,7 +407,7 @@ function openEntry(e) {
   form.current.value = e ? e.current : '';
   form.url.value = e ? e.url : '';
   form.latest.value = e ? (e.latest_manual || '') : '';
-  form.picture.value = e ? (e.picture || '') : '';
+  form.picture.value = e ? (e.picture_manual || '') : '';
   $('#entry-error').textContent = '';
   syncLatest();
   $('#dlg-entry').showModal();
@@ -382,6 +437,11 @@ $('#rows').addEventListener('click', async ev => {
   try {
     if (b.dataset.action === 'edit') return openEntry(e);
     if (b.dataset.action === 'check') { await api(path + '/check', { method: 'POST' }); toast('Checking ' + e.name + '…'); setTimeout(load, 2500); return; }
+    if (b.dataset.action === 'ignore' || b.dataset.action === 'unignore') {
+      const ignored = b.dataset.action === 'ignore';
+      await api(path + '/ignore', { method: 'POST', body: JSON.stringify({ ignored }) });
+      toast(ignored ? `Ignoring ${e.name} — find it under Ignored` : `Tracking ${e.name} again`); return load();
+    }
     if (b.dataset.action === 'mark') { await api(path + '/mark-updated', { method: 'POST' }); toast(e.name + ' marked as updated'); return load(); }
     if (b.dataset.action === 'delete') {
       const msg = e.source === 'mqtt'
@@ -405,7 +465,46 @@ $('#btn-check').addEventListener('click', async () => {
 });
 
 // ---- Machine setup ----
+const conn = $('#conn-form');
 let agentLoaded = false;
+
+// Paste-safe: the script is written to a file first, so its questions read
+// the keyboard instead of the rest of the pasted text.
+const pasteBlock = script =>
+  "(umask 077; cat > /tmp/vt-install.sh) <<'VT_INSTALL_EOF'\n" + script.replace(/\n*$/, '\n') + 'VT_INSTALL_EOF\n' +
+  'if [ "$(id -u)" = 0 ]; then bash /tmp/vt-install.sh; else sudo bash /tmp/vt-install.sh; fi; rm -f /tmp/vt-install.sh\n';
+
+function showSetup(m) {
+  const a = m.agent;
+  const host = location.hostname;
+  conn.broker.value = a.broker || (/^(localhost|127\.|.*nabu\.casa$)/.test(host) ? '' : host);
+  conn.port.value = a.port || 1883;
+  conn.username.value = a.username || '';
+  conn.password.value = a.password || '';
+  const ready = !!a.broker;
+  $('#install-locked').hidden = ready;
+  $('#install-wrap').hidden = !ready;
+  $('#oneliner').hidden = !m.install_port;
+  $('#oneliner-off').hidden = !!m.install_port;
+  if (m.install_port) {
+    const h = a.broker.includes(':') && !a.broker.startsWith('[') ? `[${a.broker}]` : a.broker;
+    $('#oneliner-code').textContent = `curl -fsSL http://${h}:${m.install_port}/install/${m.install_token} | bash`;
+  }
+}
+
+async function loadSetup() {
+  const m = await api('api/machine-setup');
+  showSetup(m);
+  const texts = await Promise.all([
+    m.agent.broker ? fetch('api/install.sh').then(r => r.text()) : '',
+    fetch('api/agent-conf').then(r => r.text()),
+    agentLoaded ? null : fetch('api/agent').then(r => r.text())
+  ]);
+  if (texts[0]) $('#install-code').textContent = pasteBlock(texts[0]);
+  $('#conf-code').textContent = texts[1];
+  if (texts[2] !== null) { $('#agent-code').textContent = texts[2]; agentLoaded = true; }
+}
+
 $('#btn-machine').addEventListener('click', async () => {
   const i = state.info || {};
   $('#mqtt-dot').className = 'dot ' + (i.mqtt_connected ? 'on' : 'off');
@@ -413,13 +512,24 @@ $('#btn-machine').addEventListener('click', async () => {
     ? `The add-on is connected to MQTT (${i.broker}). Machines publish to ${i.report_topic}.`
     : 'The add-on is not connected to MQTT yet — machines can report, but nothing will show until it connects.';
   $('#stale-note').textContent = `A machine that hasn't reported for ${i.stale_hours} hours is flagged as "Not reporting", in this list and in Home Assistant.`;
+  $('#conn-error').textContent = '';
   $('#dlg-machine').showModal();
-  if (!agentLoaded) {
-    try {
-      const [a, c] = await Promise.all([fetch('api/agent').then(r => r.text()), fetch('api/agent-conf').then(r => r.text())]);
-      $('#agent-code').textContent = a; $('#conf-code').textContent = c; agentLoaded = true;
-    } catch (err) { $('#agent-code').textContent = 'Could not load: ' + err.message; }
-  }
+  try { await loadSetup(); } catch (err) { $('#conn-error').textContent = 'Could not load: ' + err.message; }
+});
+
+conn.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const btn = $('#conn-save'); btn.disabled = true; $('#conn-error').textContent = '';
+  try {
+    await api('api/machine-setup', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(conn))) });
+    await loadSetup(); toast('Login saved — the install script below now uses it');
+  } catch (err) { $('#conn-error').textContent = err.message; }
+  finally { btn.disabled = false; }
+});
+
+$('#new-link').addEventListener('click', async () => {
+  try { await api('api/machine-setup/new-link', { method: 'POST' }); await loadSetup(); toast('New link made; the old one no longer works'); }
+  catch (err) { toast(err.message); }
 });
 
 document.addEventListener('click', async ev => {

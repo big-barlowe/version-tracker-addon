@@ -14,11 +14,15 @@ Nothing is ever installed: the entities have no install command, they are
 reminders only.
 """
 
+import base64
+import hmac
 import json
 import logging
 import os
 import queue
 import re
+import secrets
+import shlex
 import threading
 import time
 import urllib.error
@@ -30,18 +34,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("VT_DATA_DIR", "/data")
 OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")
 STORE_FILE = os.path.join(DATA_DIR, "entries.json")
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 STATIC_DIR = os.path.join(APP_DIR, "static")
 AGENT_FILE = os.path.join(APP_DIR, "vt-agent.sh")
 AGENT_CONF_FILE = os.path.join(APP_DIR, "version-tracker.conf.example")
+INSTALL_FILE = os.path.join(APP_DIR, "vt-install.sh")
 HTTP_PORT = int(os.environ.get("VT_HTTP_PORT", "8099"))
+INSTALL_PORT = int(os.environ.get("VT_INSTALL_LISTEN", "8098"))  # inside the container
+INSTALL_HOST_PORT = os.environ.get("VT_INSTALL_PORT", "")        # set under Network in the add-on, if at all
 BASE = "version_tracker"
 USER_AGENT = "version-tracker-ha-addon/" + VERSION
-PROXMOX_ICON = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/proxmox.webp"
+ICON_CDN = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/"
+LOGO_TTL = 7 * 86400
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("version_tracker")
@@ -187,11 +196,16 @@ def http_get(url, headers):
         raise LookupError("can't reach %s (%s)" % (host, getattr(e, "reason", e)))
 
 
-def latest_github(p, opts):
-    base = "https://api.github.com/repos/" + p["path"]
+def github_headers(opts):
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if opts.get("github_token"):
         headers["Authorization"] = "Bearer " + opts["github_token"]
+    return headers
+
+
+def latest_github(p, opts):
+    base = "https://api.github.com/repos/" + p["path"]
+    headers = github_headers(opts)
 
     def fail(code, hdrs):
         if code in (403, 429) and str(hdrs.get("X-RateLimit-Remaining", "")) == "0":
@@ -224,12 +238,17 @@ def gitlab_token(opts, host):
     return ""
 
 
-def latest_gitlab(p, opts):
+def gitlab_api(p, opts):
     api = "%s://%s/api/v4/projects/%s" % (p["scheme"], p["host"], urllib.parse.quote(p["path"], safe=""))
     headers = {}
     token = gitlab_token(opts, p["host"])  # only ever sent to the host it was saved for
     if token:
         headers["PRIVATE-TOKEN"] = token
+    return api, headers
+
+
+def latest_gitlab(p, opts):
+    api, headers = gitlab_api(p, opts)
 
     def fail(code):
         if code == 404:
@@ -275,19 +294,124 @@ def lookup_latest(link, opts):
 
 
 # --------------------------------------------------------------------------
+# Logos: a picture near the top of the README, else the org / project avatar
+# --------------------------------------------------------------------------
+
+README_IMG_RE = re.compile(r"!\[([^\]]*)\]\(\s*<?([^\s)>]+)[^)]*\)|<img\b([^>]*)>", re.I)
+NOT_LOGO_RE = re.compile(
+    r"shields?\.io|/shield/|contribute\.design|badgen|badge|/workflows?/|/actions\b|codecov|coveralls|travis-ci|circleci|goreportcard|"
+    r"sonarcloud|bestpractices|fossa|snyk|discord|gitter|opencollective|buymeacoffee|ko-fi|liberapay|"
+    r"patreon|paypal|sponsor|star-history|contrib\.rocks|weblate|crowdin|deepwiki|trendshift|producthunt|"
+    r"repobeats|my\.home-assistant|screenshot|screen-shot|demo|\.gif(\?|$)", re.I)
+
+
+def html_attr(attrs, name):
+    m = re.search(r"\b%s\s*=\s*[\"']([^\"']*)[\"']" % name, attrs, re.I)
+    return m.group(1).strip() if m else ""
+
+
+def readme_logo(text, base, name=""):
+    """The likeliest logo among the first pictures of a README, skipping badges.
+    A picture named after the project wins (linuxserver.io READMEs start with
+    their own logo, then the app's), then one called logo or icon."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)[:6000]
+    found = []
+    for m in README_IMG_RE.finditer(text):
+        if m.group(3) is not None:
+            src, alt = html_attr(m.group(3), "src"), html_attr(m.group(3), "alt") + " " + html_attr(m.group(3), "title")
+        else:
+            src, alt = m.group(2).strip(), m.group(1)
+        if not src or NOT_LOGO_RE.search(src) or NOT_LOGO_RE.search(alt):
+            continue
+        url = urllib.parse.urljoin(base, src)
+        url = re.sub(r"^(https://github\.com/[^/]+/[^/]+)/blob/", r"\1/raw/", url)
+        if url.startswith(("http://", "https://")):
+            found.append((alt, url))
+        if len(found) == 6:
+            break
+    name = re.sub(r"^docker-|[-_.]?docker$", "", name.lower())
+    for pattern in ([re.escape(name)] if len(name) > 2 else []) + [r"logo|icon|brand"]:
+        for alt, url in found:
+            if re.search(pattern, alt + " " + url.rsplit("/", 1)[-1], re.I):
+                return url
+    return found[0][1] if found else ""
+
+
+def logo_github(p, opts):
+    headers = github_headers(opts)
+    code, body, _ = http_get("https://api.github.com/repos/%s/readme" % p["path"], headers)
+    if code == 200:
+        r = json.loads(body)
+        text = base64.b64decode(r.get("content") or "").decode("utf-8", "replace")
+        url = readme_logo(text, r.get("download_url") or p["web"] + "/raw/HEAD/", p["path"].split("/")[1])
+        if url:
+            return url
+    elif code != 404:
+        raise LookupError("GitHub HTTP %s" % code)
+    # No picture in the README: use the organisation's avatar (not a person's).
+    code, body, _ = http_get("https://api.github.com/users/" + p["path"].split("/")[0], headers)
+    if code == 200:
+        u = json.loads(body)
+        if u.get("type") == "Organization" and u.get("avatar_url"):
+            return u["avatar_url"]
+    return ""
+
+
+def logo_gitlab(p, opts):
+    api, headers = gitlab_api(p, opts)
+    root = "%s://%s/" % (p["scheme"], p["host"])
+    code, body, _ = http_get(api, headers)
+    if code != 200:
+        raise LookupError("GitLab HTTP %s" % code)
+    proj = json.loads(body)
+    if proj.get("avatar_url"):
+        return urllib.parse.urljoin(root, proj["avatar_url"])
+    branch, readme = proj.get("default_branch") or "", proj.get("readme_url") or ""
+    marker = "/-/blob/%s/" % branch
+    if branch and marker in readme:
+        path = readme.split(marker, 1)[1]
+        code, text, _ = http_get("%s/repository/files/%s/raw?ref=%s" % (
+            api, urllib.parse.quote(path, safe=""), urllib.parse.quote(branch, safe="")), headers)
+        if code == 200:
+            url = readme_logo(text, "%s/-/raw/%s/%s" % (p["web"], branch, path), p["path"].rsplit("/", 1)[-1])
+            if url:
+                return url
+    ns = proj.get("namespace") or {}
+    if ns.get("kind") == "group" and ns.get("avatar_url"):
+        return urllib.parse.urljoin(root, ns["avatar_url"])
+    return ""
+
+
+def lookup_logo(link, opts):
+    p = parse_project(link)
+    return logo_github(p, opts) if p["provider"] == "github" else logo_gitlab(p, opts)
+
+
+# --------------------------------------------------------------------------
 # Entries
 # --------------------------------------------------------------------------
 #
 # Every entry has: id, source ("project" or "mqtt"), name, current, url,
 # latest_manual (typed by hand, or sent by an agent), found_* (from a
-# GitHub/GitLab lookup), picture. MQTT entries also carry machine, kind,
-# topic, pending, security, packages and last_seen.
+# GitHub/GitLab lookup, including found_picture and logo_checked), picture.
+# MQTT entries also carry machine, kind, topic, pending, security, packages
+# and last_seen.
 
 KIND_LABELS = {"proxmox": "Proxmox", "debian": "Debian", "ubuntu": "Ubuntu", "docker": "Docker", "app": "App"}
+KIND_ICONS = {"proxmox": "proxmox", "docker": "docker", "debian": "debian-linux", "ubuntu": "ubuntu-linux"}
 
 
 def effective_latest(e):
     return e.get("latest_manual") or e.get("found_version") or ""
+
+
+def picture_for(e):
+    """A picture set by hand or by the agent, else the project's logo, else a generic one for machines."""
+    pic = e.get("picture") or e.get("found_picture") or ""
+    if not pic and e.get("source") == "mqtt":
+        icon = KIND_ICONS.get(e.get("kind") or "") or ("linux" if (e.get("topic") or "").endswith("/system") else "")
+        pic = ICON_CDN + icon + ".webp" if icon else ""
+    return pic if pic.startswith(("http://", "https://")) else ""
 
 
 def source_label(e):
@@ -415,6 +539,84 @@ class Store:
             return e
 
 
+class Settings:
+    """Things set on the web page: the MQTT login machines use, the secret in
+    the one-line installer link, and ignored entries. Ignored ids are kept
+    here rather than on the entry, so a machine item stays ignored after its
+    agent clears it and reports it again."""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.RLock()
+        self.data = {"agent": {"broker": "", "port": 1883, "username": "", "password": ""},
+                     "install_token": "", "ignored": []}
+        try:
+            with open(path) as f:
+                saved = json.load(f)
+            self.data["agent"].update(saved.get("agent") or {})
+            self.data["install_token"] = saved.get("install_token") or ""
+            self.data["ignored"] = list(saved.get("ignored") or [])
+        except FileNotFoundError:
+            pass
+        except (ValueError, AttributeError) as err:
+            log.error("Could not read %s (%s); starting with defaults", path, err)
+        if not self.data["install_token"]:
+            self.new_token()
+
+    def save(self):
+        with self.lock:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.data, f, indent=1)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+
+    def agent(self):
+        with self.lock:
+            return dict(self.data["agent"])
+
+    def set_agent(self, data):
+        broker = str(data.get("broker") or "").strip()
+        if not re.match(r"^[A-Za-z0-9._:\[\]-]+$", broker):
+            raise ValueError("Enter the broker's IP address or host name")
+        try:
+            port = int(data.get("port") or 1883)
+            assert 0 < port < 65536
+        except (ValueError, AssertionError):
+            raise ValueError("Port must be a number from 1 to 65535")
+        with self.lock:
+            self.data["agent"] = {"broker": broker, "port": port, "username": str(data.get("username") or "").strip(),
+                                  "password": str(data.get("password") or "")}
+            self.save()
+
+    def token(self):
+        with self.lock:
+            return self.data["install_token"]
+
+    def new_token(self):
+        with self.lock:
+            self.data["install_token"] = secrets.token_urlsafe(18)
+            self.save()
+
+    def is_ignored(self, eid):
+        with self.lock:
+            return eid in self.data["ignored"]
+
+    def ignored(self):
+        with self.lock:
+            return list(self.data["ignored"])
+
+    def set_ignored(self, eid, ignored):
+        with self.lock:
+            if ignored == (eid in self.data["ignored"]):
+                return
+            if ignored:
+                self.data["ignored"].append(eid)
+            else:
+                self.data["ignored"].remove(eid)
+            self.save()
+
+
 # --------------------------------------------------------------------------
 # The tracker: MQTT, lookups, scheduling
 # --------------------------------------------------------------------------
@@ -423,9 +625,11 @@ class Tracker:
     def __init__(self, opts):
         self.opts = opts
         self.store = Store(STORE_FILE)
+        self.settings = Settings(SETTINGS_FILE)
         self.prefix = (opts.get("discovery_prefix") or "homeassistant").strip("/")
         self.published = {}          # entry id -> last published payloads
         self.cache = {}              # project key -> (time, result or error)
+        self.logos = {}              # project key -> (time, picture link)
         self.cache_lock = threading.Lock()
         self.jobs = queue.Queue()
         self.queued = set()
@@ -482,6 +686,8 @@ class Tracker:
         client.subscribe([(BASE + "/report/#", 1), (self.prefix + "/status", 1)])
         self.published.clear()
         self.publish_all()
+        for eid in self.settings.ignored():  # in case it was ignored while the broker was away
+            self.unpublish(eid)
 
     def on_disconnect(self, client, userdata, *args):  # signature differs between paho 1.x and 2.x
         self.connected = False
@@ -532,12 +738,14 @@ class Tracker:
                "state_topic": t["state"], "json_attributes_topic": t["attrs"],
                "availability_topic": BASE + "/status", "device": device,
                "origin": {"name": "Version Tracker", "sw_version": VERSION}}
-        picture = e.get("picture") or (PROXMOX_ICON if e.get("kind") == "proxmox" else "")
-        if picture.startswith(("http://", "https://")):
+        picture = picture_for(e)
+        if picture:
             cfg["entity_picture"] = picture
         return cfg
 
     def publish_entry(self, e):
+        if self.settings.is_ignored(e["id"]):
+            return
         t = self.topics(e["id"])
         ev = evaluate(e, self.opts)
         state = {"installed_version": e.get("current") or "unknown", "latest_version": ev["ha_latest"] or e.get("current") or "unknown",
@@ -601,6 +809,8 @@ class Tracker:
                 parse_project(url)
             except ValueError:
                 url = ""
+        if url != e.get("url"):
+            e.update(found_picture="", logo_checked=0)
         e.update(topic=suffix, machine=machine, name=str(data.get("name") or machine),
                  title=str(data.get("title") or "") or None, kind=str(data.get("kind") or ""),
                  current=installed, latest_manual=str(data.get("latest_version") or "").strip(),
@@ -662,9 +872,25 @@ class Tracker:
             fields = {"error": "", "found_version": result["version"], "found_released": result["released"],
                       "found_notes_url": result["notes_url"]}
         fields["checked"] = hit[0]
+        if not e.get("picture") and now_ts() - (e.get("logo_checked") or 0) > LOGO_TTL:
+            fields.update(self.find_logo(key, e["url"]))
         e = self.store.update(eid, **fields)
         if e:
             self.publish_entry(e)
+
+    def find_logo(self, key, url):
+        """found_picture and logo_checked for a project, looked up at most once a week."""
+        with self.cache_lock:
+            hit = self.logos.get(key)
+        if not hit or now_ts() - hit[0] > LOGO_TTL:
+            try:
+                hit = (now_ts(), lookup_logo(url, self.opts))
+            except Exception as err:  # only a picture, so try again in an hour
+                log.info("Could not look up a logo for %s (%s)", key, err)
+                hit = (now_ts() - LOGO_TTL + 3600, "")
+            with self.cache_lock:
+                self.logos[key] = hit
+        return {"found_picture": hit[1], "logo_checked": hit[0]}
 
     def check_all(self, force=False):
         self.last_full_check = now_ts()
@@ -702,7 +928,8 @@ class Tracker:
             if not old or old.get("source") != "project":
                 raise KeyError(eid)
             if old.get("url") != url:
-                fields.update(found_version="", found_released="", found_notes_url="", error="", checked=0)
+                fields.update(found_version="", found_released="", found_notes_url="", error="", checked=0,
+                              found_picture="", logo_checked=0)
             e = self.store.update(eid, **fields)
         else:
             e = dict(fields, id="p_" + uuid.uuid4().hex[:8], source="project", created=now_ts())
@@ -730,7 +957,47 @@ class Tracker:
         self.unpublish(eid)
         if e.get("source") == "mqtt" and e.get("topic"):
             self.pub(BASE + "/report/" + e["topic"], "")  # clear the retained report too
+        else:
+            self.settings.set_ignored(eid, False)
         return e
+
+    def set_ignored(self, eid, ignored):
+        e = self.store.get(eid)
+        if not e:
+            raise KeyError(eid)
+        self.settings.set_ignored(eid, ignored)
+        if ignored:
+            self.unpublish(eid)  # gone from Home Assistant too
+        else:
+            self.publish_entry(e)
+        return e
+
+    # ---- Machine setup ----
+
+    def agent_conf(self):
+        """The settings file for vt-agent, with the saved broker login filled in."""
+        with open(AGENT_CONF_FILE) as f:
+            text = f.read()
+        a = self.settings.agent()
+        if a["broker"]:
+            for key, value in (("BROKER", a["broker"]), ("PORT", a["port"]),
+                               ("MQTT_USER", a["username"]), ("MQTT_PASS", a["password"])):
+                line = "%s=%s" % (key, shlex.quote(str(value)))
+                text = re.sub(r"(?m)^%s=.*$" % key, lambda m: line, text, count=1)
+        return text
+
+    def installer(self):
+        """vt-install.sh with the broker login, the agent and its settings file built in."""
+        a = self.settings.agent()
+        with open(INSTALL_FILE) as f:
+            text = f.read()
+        with open(AGENT_FILE) as f:
+            agent = f.read().rstrip("\n")
+        login = "BROKER=%s; PORT=%s; MQTT_USER=%s; MQTT_PASS=%s" % tuple(
+            shlex.quote(str(v)) for v in (a["broker"], a["port"], a["username"], a["password"]))
+        for marker, value in (("@LOGIN@", login), ("@AGENT@", agent), ("@CONF@", self.agent_conf().rstrip("\n"))):
+            text = re.sub(r"(?m)^.*%s.*$" % marker, lambda m: value, text, count=1)
+        return text
 
     def view(self, e):
         ev = evaluate(e, self.opts)
@@ -742,7 +1009,8 @@ class Tracker:
                 "project_web": self._web(e.get("url")), "notes_url": e.get("found_notes_url") or e.get("release_url") or "",
                 "released": e.get("found_released") or "", "checked": iso(e.get("checked")),
                 "last_seen": iso(e.get("last_seen")), "error": e.get("error") or "",
-                "picture": e.get("picture") or (PROXMOX_ICON if e.get("kind") == "proxmox" else ""),
+                "picture": picture_for(e), "picture_manual": e.get("picture") or "",
+                "ignored": self.settings.is_ignored(e["id"]),
                 "latest_manual": e.get("latest_manual") if e.get("source") == "project" else "",
                 "summary": build_summary(e, ev, self.opts)}
 
@@ -760,29 +1028,38 @@ class Tracker:
                 "github_token": bool(self.opts.get("github_token")),
                 "last_full_check": iso(self.last_full_check)}
 
+    def machine_setup(self):
+        return {"agent": self.settings.agent(), "install_port": int(INSTALL_HOST_PORT) if INSTALL_HOST_PORT else None,
+                "install_token": self.settings.token()}
+
 
 # --------------------------------------------------------------------------
 # Web page and JSON API (served through Home Assistant ingress)
 # --------------------------------------------------------------------------
 
+class BaseHandler(BaseHTTPRequestHandler):
+    server_version = "VersionTracker/" + VERSION
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def send(self, code, body, ctype="application/json", extra=None):
+        data = body if isinstance(body, bytes) else (json.dumps(body) if ctype == "application/json" else body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype + ("; charset=utf-8" if not ctype.startswith("image") else ""))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def route(self):
+        return [p for p in urllib.parse.urlsplit(self.path).path.split("/") if p]
+
+
 def make_handler(tracker):
-    class Handler(BaseHTTPRequestHandler):
-        server_version = "VersionTracker/" + VERSION
-
-        def log_message(self, fmt, *args):
-            pass
-
-        def send(self, code, body, ctype="application/json", extra=None):
-            data = body if isinstance(body, bytes) else (json.dumps(body) if ctype == "application/json" else body).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", ctype + ("; charset=utf-8" if not ctype.startswith("image") else ""))
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            for k, v in (extra or {}).items():
-                self.send_header(k, v)
-            self.end_headers()
-            self.wfile.write(data)
-
+    class Handler(BaseHandler):
         def body(self):
             n = int(self.headers.get("Content-Length") or 0)
             if not n:
@@ -794,9 +1071,6 @@ def make_handler(tracker):
             if not isinstance(data, dict):
                 raise ValueError("Request body must be a JSON object")
             return data
-
-        def route(self):
-            return [p for p in urllib.parse.urlsplit(self.path).path.split("/") if p]
 
         def handle_api(self, method):
             parts = self.route()
@@ -819,6 +1093,8 @@ def make_handler(tracker):
                     return self.send(200, {"ok": True})
                 if len(p) == 3 and p[0] == "entries" and p[2] == "mark-updated" and method == "POST":
                     return self.send(200, tracker.view(tracker.mark_updated(p[1])))
+                if len(p) == 3 and p[0] == "entries" and p[2] == "ignore" and method == "POST":
+                    return self.send(200, tracker.view(tracker.set_ignored(p[1], bool(self.body().get("ignored", True)))))
                 if len(p) == 3 and p[0] == "entries" and p[2] == "check" and method == "POST":
                     if not tracker.store.get(p[1]):
                         raise KeyError(p[1])
@@ -832,9 +1108,19 @@ def make_handler(tracker):
                         return self.send(200, f.read(), "text/x-shellscript",
                                          {"Content-Disposition": 'attachment; filename="vt-agent"'})
                 if p == ["agent-conf"] and method == "GET":
-                    with open(AGENT_CONF_FILE, "rb") as f:
-                        return self.send(200, f.read(), "text/plain",
-                                         {"Content-Disposition": 'attachment; filename="version-tracker.conf"'})
+                    return self.send(200, tracker.agent_conf(), "text/plain",
+                                     {"Content-Disposition": 'attachment; filename="version-tracker.conf"'})
+                if p == ["install.sh"] and method == "GET":
+                    return self.send(200, tracker.installer(), "text/x-shellscript",
+                                     {"Content-Disposition": 'attachment; filename="vt-install.sh"'})
+                if p == ["machine-setup"] and method == "GET":
+                    return self.send(200, tracker.machine_setup())
+                if p == ["machine-setup"] and method == "PUT":
+                    tracker.settings.set_agent(self.body())
+                    return self.send(200, tracker.machine_setup())
+                if p == ["machine-setup", "new-link"] and method == "POST":
+                    tracker.settings.new_token()
+                    return self.send(200, tracker.machine_setup())
                 return self.send(404, {"error": "not found"})
             except KeyError:
                 return self.send(404, {"error": "That entry no longer exists"})
@@ -859,6 +1145,22 @@ def make_handler(tracker):
     return Handler
 
 
+def make_install_handler(tracker):
+    """The only thing on the optional LAN port: GET /install/<secret>, for the
+    one-line installer. The GUI and API stay behind Home Assistant ingress."""
+    class InstallHandler(BaseHandler):
+        def do_GET(self):
+            p = self.route()
+            ok = (len(p) == 2 and p[0] == "install" and tracker.settings.agent()["broker"] and
+                  hmac.compare_digest(p[1].encode(), tracker.settings.token().encode()))
+            if not ok:
+                return self.send(404, "Not found. Copy the current command from the Version Tracker page.\n", "text/plain")
+            log.info("Machine installer downloaded by %s", self.client_address[0])
+            self.send(200, tracker.installer(), "text/x-shellscript")
+
+    return InstallHandler
+
+
 def main():
     opts = load_options()
     tracker = Tracker(opts)
@@ -866,6 +1168,10 @@ def main():
     tracker.start_mqtt()
     threading.Thread(target=tracker.worker, daemon=True).start()
     threading.Thread(target=tracker.scheduler, daemon=True).start()
+    if INSTALL_HOST_PORT:
+        installer = ThreadingHTTPServer(("0.0.0.0", INSTALL_PORT), make_install_handler(tracker))
+        threading.Thread(target=installer.serve_forever, daemon=True).start()
+        log.info("Machine installer available on port %s", INSTALL_HOST_PORT)
     server = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), make_handler(tracker))
     log.info("Web page listening on port %d", HTTP_PORT)
     server.serve_forever()

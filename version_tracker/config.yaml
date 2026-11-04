@@ -1,5 +1,5 @@
 name: Version Tracker
-version: "1.0.1"
+version: "1.1.0"
 slug: version_tracker
 description: Shows new GitHub/GitLab releases and machines that need updates in Settings → Updates
 arch:
@@ -12,6 +12,8 @@ panel_icon: mdi:package-up
 panel_title: Version Tracker
 services:
   - mqtt:want
+ports:
+  8098/tcp: null
 options:
   check_interval_hours: 6
   stale_hours: 24

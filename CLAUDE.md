@@ -19,15 +19,16 @@ Home Assistant can add it as an app/add-on repository by URL).
 repository.yaml                 add-on repository manifest (for adding the GitHub repo in HA)
 README.md                       GitHub landing page with install steps
 version_tracker/
-  config.yaml                   add-on manifest: ingress on 8099, services mqtt:want, options/schema
+  config.yaml                   add-on manifest: ingress on 8099, optional port 8098, mqtt:want, options
   Dockerfile                    HA base image (BUILD_FROM, default base:3.24) + python3 + paho-mqtt 2.x
-  run.sh                        bashio: reads Mosquitto credentials, execs app.py
+  run.sh                        bashio: Mosquitto credentials + installer host port, execs app.py
   translations/en.yaml          labels for the Configuration tab
   DOCS.md / README.md / CHANGELOG.md
   icon.png / logo.png
   app/app.py                    the whole backend (stdlib HTTP server + paho)
   app/static/index.html         the whole GUI (vanilla JS, no build step)
   app/vt-agent.sh               script that runs on each machine (bash, cron)
+  app/vt-install.sh             installer template; app.py fills in @LOGIN@, @AGENT@, @CONF@
   app/version-tracker.conf.example   settings template for vt-agent
 ```
 
@@ -57,13 +58,28 @@ version_tracker/
   compares against. Pending apt packages make it e.g. `9.1.2 (+3 packages)`.
   A stale machine gets `<installed> (not reporting)`, so it still shows in
   Updates.
+- **Pictures:** `picture_for()` uses the entry's own picture, else
+  `found_picture` (first non-badge image near the top of the README, else
+  the GitHub org / GitLab project avatar; looked up in `check_entry`, at most
+  weekly per project), else a dashboard-icons picture by kind for machines.
+- **Ignored** ids live in `/data/settings.json` (not on the entry), so a
+  machine item stays ignored after its agent clears and re-reports it.
+  `publish_entry` skips them; ignoring clears their retained topics.
+- **Machine setup:** the login machines use (broker, port, user, password)
+  is saved from the GUI to `/data/settings.json` (mode 600). `agent_conf()`
+  and `installer()` build the settings file and `vt-install.sh` from it.
+  The GUI wraps the installer in a heredoc that writes it to a file before
+  running it, so its questions read the keyboard, not the rest of the paste.
+  If a host port is set for 8098/tcp under Network, a second listener serves
+  only `GET /install/<secret>` for a `curl | bash` one-liner.
 - GitLab tokens are stored per host and only sent to that host.
 - Entries persist in `/data/entries.json`. Options come from `/data/options.json`.
 
 ## Running and testing locally
 
-app.py honours `VT_DATA_DIR` (default `/data`), `VT_HTTP_PORT` (default 8099)
-and `MQTT_HOST` / `MQTT_PORT` / `MQTT_USERNAME` / `MQTT_PASSWORD` / `MQTT_SSL`.
+app.py honours `VT_DATA_DIR` (default `/data`), `VT_HTTP_PORT` (default 8099),
+`VT_INSTALL_PORT` (host port for the installer; empty = off) and
+`MQTT_HOST` / `MQTT_PORT` / `MQTT_USERNAME` / `MQTT_PASSWORD` / `MQTT_SSL`.
 To run it outside Home Assistant:
 
 ```bash
@@ -114,9 +130,24 @@ Tested with Docker on an arm64 Mac (2026-11-04):
   (entity and device removed), agent-cleared items, LWT → `unavailable`, and
   add-on restart all behaved correctly, with no warnings in either log.
 
+1.1.0, same setup (mock Supervisor also answering `/addons/self/info`):
+
+- `run.sh` got the installer port through `bashio::app.port`.
+- Logo lookup against real READMEs (Immich, Jellyfin, linuxserver images,
+  Uptime Kuma, Traefik, AdGuard, pi-hole, Nextcloud, GitLab projects); HA
+  received the pictures as `entity_picture`.
+- Installer in fresh `debian:12` containers: the `curl | bash` one-liner
+  with no terminal (defaults), and the paste block answering prompts in a
+  real pty, over an existing settings file (APPS/PICTURE kept, `.bak`
+  written). The MQTT password had a space, quotes, `$` and `@`.
+- Ignoring: removed from HA, stayed hidden after re-report, after an empty
+  report plus re-report, and after an add-on restart; un-ignoring restored it.
+- GUI screenshotted with Playwright (light, dark, 400px).
+
 **Not yet tested for real:**
 - installing through the Supervisor on a real HA OS / Supervised system
-  (ingress panel, Configuration tab, real `/services/mqtt`)
+  (ingress panel, Configuration tab, real `/services/mqtt` and
+  `/addons/self/info`, the Network port setting)
 - self-hosted GitLab and GitLab tokens
 - vt-agent on a real Proxmox host (pve-manager detection), and Docker
   container reporting

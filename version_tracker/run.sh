@@ -14,4 +14,14 @@ elif ! bashio::config.has_value 'mqtt_host'; then
   bashio::log.warning "No MQTT broker found. Install the Mosquitto broker add-on, or set mqtt_host in the Configuration tab."
 fi
 
+# The host port for the one-line machine installer, if one is set under
+# Network (bashio renamed addon.* to app.* in 2026).
+if declare -F bashio::app.port >/dev/null; then
+  VT_INSTALL_PORT="$(bashio::app.port 8098 2>/dev/null || true)"
+else
+  VT_INSTALL_PORT="$(bashio::addon.port 8098 2>/dev/null || true)"
+fi
+[ "${VT_INSTALL_PORT}" = "null" ] && VT_INSTALL_PORT=""
+export VT_INSTALL_PORT
+
 exec python3 -u /app/app.py

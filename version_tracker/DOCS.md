@@ -34,24 +34,57 @@ Open **Version Tracker** in the sidebar and choose **Add project**:
 | Current version | The version you run now |
 | Project link | e.g. `https://github.com/owner/repo`, `https://gitlab.com/group/project` or a self-hosted GitLab link. `owner/repo` works for GitHub. |
 | Latest version | Only for items without a link |
-| Picture link | Optional icon for Home Assistant |
+| Picture link | Optional. Leave blank to use the project's logo (see [Pictures](#pictures)). |
 
 After updating something, press **✓ Mark as updated** on its row. That sets
 the current version to the latest one and clears it from Settings → Updates.
 
 ## Adding a machine
 
-On the Version Tracker page, **Add a machine** shows these steps with the
-script ready to copy:
+On the Version Tracker page, choose **Add a machine**.
 
-1. `apt install -y mosquitto-clients`
-2. Save the script as `/usr/local/bin/vt-agent` and `chmod +x` it.
-3. Create `/etc/version-tracker.conf` with your broker IP, username and
-   password, then `chmod 600` it.
-4. Run `vt-agent` once to check it works (`vt-agent --dry-run` shows what it
-   would send without sending it).
-5. Run it every hour:
-   `echo '17 * * * * root /usr/local/bin/vt-agent >/dev/null 2>&1' > /etc/cron.d/version-tracker`
+1. **MQTT login for your machines.** Enter the broker address (usually Home
+   Assistant's IP), port, and a username and password, and press **Save
+   login**. With the Mosquitto broker app, any Home Assistant user works, so
+   you can create one just for this (e.g. `vt-agent`) under **Settings →
+   People**. The login is stored in the app and built into the install script.
+2. **Install on the machine.** Press **Copy install script**, open a root
+   shell on the machine (on Proxmox, the node's **Shell**), paste it and press
+   Enter. The script:
+   - asks what to call the machine in Home Assistant (default: its hostname)
+     and whether to report every hour,
+   - installs `mosquitto-clients` if it's missing,
+   - writes `/etc/version-tracker.conf` (`chmod 600`) and
+     `/usr/local/bin/vt-agent`,
+   - adds `/etc/cron.d/version-tracker` if you said yes, and
+   - sends the first report, so the machine shows up straight away.
+
+   Running it again on the same machine updates the agent and the login, and
+   keeps your other settings (`APPS`, `PICTURE`, ...); the previous file is
+   saved as `/etc/version-tracker.conf.bak`. To skip the questions, run it as
+   `VT_NAME=pve1 VT_SCHEDULE=yes bash vt-install.sh`.
+
+### One-line install
+
+To get a `curl ... | bash` command instead of a pasted script, open the
+app's **Configuration** tab, set a port for **Machine installer** under
+**Network** (e.g. 8098), save and restart the app. **Add a machine** then
+shows a command like:
+
+```bash
+curl -fsSL http://192.168.1.10:8098/install/<secret> | bash
+```
+
+That port only serves the install script, and only at that secret link.
+Because the script contains the MQTT login, treat the link like a password;
+**New link** makes a new one and stops the old one working. Leave the port
+empty to turn it off.
+
+### By hand
+
+**Set it up by hand instead** (at the bottom of the dialog) shows the agent,
+a filled-in settings file and the cron line to copy separately. You can also
+run `vt-agent --dry-run` on a machine at any time to see what it would send.
 
 The script refreshes the package lists itself, at most every `REFRESH_HOURS`
 (6 by default).
@@ -91,6 +124,29 @@ If a machine hasn't reported for `stale_hours` (24 by default), it shows as
 machine that's off, or whose cron job broke, doesn't quietly drop off the
 list. Removing a machine on the page clears it, but it comes back the next
 time it reports. To retire it for good, delete its cron file first.
+
+## Ignoring items
+
+Some things don't need tracking, such as the database and cache containers
+that come with an app (an Immich stack's `immich_redis` and
+`immich_postgres`, for example). Press the crossed-out eye on a row to ignore
+it. An ignored item disappears from the list and from Settings → Updates, and
+stays ignored when its machine reports it again. The **Ignored** tab lists
+them; press the eye there to track one again.
+
+To stop a container being reported at all, give it the
+`version_tracker.ignore: "true"` label instead.
+
+## Pictures
+
+Every item gets a picture, both on the page and in Home Assistant:
+
+1. a picture link you set (on a project, or `PICTURE` in a machine's settings),
+2. otherwise the project's logo: the first picture near the top of its README
+   that isn't a badge (one named after the project, or called logo or icon,
+   is preferred), or else the GitHub organisation's or GitLab project's
+   avatar. Logos are looked up once a week.
+3. otherwise a generic picture: Docker, Proxmox, Debian, Ubuntu or Linux.
 
 ## Options
 

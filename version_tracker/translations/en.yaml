@@ -23,3 +23,5 @@ configuration:
     name: MQTT username
   mqtt_password:
     name: MQTT password
+network:
+  8098/tcp: Machine installer. Optional; set a port to get a one-line install command for your machines on the Version Tracker page.

@@ -5,9 +5,9 @@
 # What it reports:
 #   * apt packages waiting to be installed (Debian, Ubuntu, Proxmox VE)
 #   * the Proxmox VE version, when pve-manager is installed
-#   * running Docker containers whose image says where it comes from
-#     (the org.opencontainers.image.source label, or your own
-#     version_tracker.url label); the add-on looks up their latest release
+#   * every running Docker container, with its version, image and when the
+#     image was built; the add-on finds the project from the image's labels
+#     or its name, and looks up the latest release
 #   * any apps you list in APPS in the settings file
 #
 # Settings:  /etc/version-tracker.conf   (or: VT_CONF=/path/to/file vt-agent)
@@ -16,6 +16,7 @@
 
 set -u
 export LC_ALL=C
+AGENT_VERSION="1.2.0"
 
 DRY=0
 case "${1:-}" in
@@ -112,7 +113,8 @@ fi
 pkg_json="$(printf '%s\n' "$packages" | awk 'NF && n < 40 { printf "%s\"%s\"", (n++ ? "," : ""), $1 }')"
 publish system "{\"machine\":$(json "$MACHINE"),\"name\":$(json "$MACHINE"),\"kind\":$(json "$kind"),\
 \"title\":$(json "$title"),\"installed_version\":$(json "$installed"),\"latest_version\":$(json "$latest"),\
-\"pending\":${pending:-0},\"security\":${security:-0},\"packages\":[$pkg_json],\"picture\":$(json "$PICTURE")}"
+\"pending\":${pending:-0},\"security\":${security:-0},\"packages\":[$pkg_json],\"picture\":$(json "$PICTURE"),\
+\"agent_version\":\"$AGENT_VERSION\"}"
 
 # ---------------------------------------------------------------------------
 # Apps listed in the settings file:  "Name|installed version|project link"
@@ -131,31 +133,32 @@ done
 
 # ---------------------------------------------------------------------------
 # Docker containers
-#   Labels you can put on a container (docker run -l / compose "labels:"):
+#   Labels you can put on a container (docker run -l / compose "labels:"),
+#   though a project link can also be set on the Version Tracker page:
 #     version_tracker.url=https://github.com/owner/repo   where releases come from
 #     version_tracker.name=Nice name                      name in Home Assistant
 #     version_tracker.ignore=true                         don't report it
 # ---------------------------------------------------------------------------
+version_like() { case "$1" in [0-9]*|[vV][0-9]*) return 0 ;; esac; return 1; }
+
 if [ "$DOCKER" != 0 ] && command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-  fmt='{{.Config.Image}}|{{index .Config.Labels "org.opencontainers.image.version"}}|{{index .Config.Labels "org.opencontainers.image.source"}}|{{index .Config.Labels "version_tracker.url"}}|{{index .Config.Labels "version_tracker.name"}}|{{index .Config.Labels "version_tracker.ignore"}}'
+  fmt='{{.Image}}|{{.Config.Image}}|{{index .Config.Labels "org.opencontainers.image.version"}}|{{index .Config.Labels "org.opencontainers.image.source"}}|{{index .Config.Labels "version_tracker.url"}}|{{index .Config.Labels "version_tracker.name"}}|{{index .Config.Labels "version_tracker.ignore"}}'
   while IFS= read -r c; do
     [ -n "$c" ] || continue
     info="$(docker inspect -f "$fmt" "$c" 2>/dev/null | sed 's/<no value>//g')"
-    IFS='|' read -r image ver src vt_url vt_name vt_ignore <<< "$info"
+    IFS='|' read -r image_id image ver src vt_url vt_name vt_ignore <<< "$info"
     [ "$vt_ignore" = "true" ] && continue
     url="${vt_url:-$src}"
-    if [ -z "$ver" ]; then  # fall back to the image tag if it looks like a version
-      tag="${image##*:}"
-      case "$tag" in */*|"$image") tag="" ;; esac
-      case "$tag" in *[0-9]*) ver="$tag" ;; esac
-    fi
-    if [ -z "$url" ] || [ -z "$ver" ]; then
-      echo "vt-agent: skipping container $c (no version, or no version_tracker.url label)" >&2
-      continue
-    fi
+    tag="${image%@*}"; tag="${tag##*/}"
+    case "$tag" in *:*) tag="${tag##*:}" ;; *) tag="latest" ;; esac
+    # Prefer whichever of the version label and the tag looks like a version;
+    # otherwise send what there is (e.g. "latest") and the add-on compares
+    # the image's build date with the latest release instead.
+    if ! version_like "$ver" && { version_like "$tag" || [ -z "$ver" ]; }; then ver="$tag"; fi
+    created="$(docker image inspect -f '{{.Created}}' "$image_id" 2>/dev/null)"
     publish "docker_$(slugify "$c")" "{\"machine\":$(json "$MACHINE"),\"name\":$(json "${vt_name:-$c}"),\
 \"kind\":\"docker\",\"installed_version\":$(json "$ver"),\"project_url\":$(json "$url"),\
-\"image\":$(json "$image")}"
+\"image\":$(json "$image"),\"image_created\":$(json "$created")}"
   done < <(docker ps --format '{{.Names}}')
 fi
 

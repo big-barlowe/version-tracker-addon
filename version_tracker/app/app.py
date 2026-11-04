@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("VT_DATA_DIR", "/data")
 OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")
@@ -51,6 +51,18 @@ BASE = "version_tracker"
 USER_AGENT = "version-tracker-ha-addon/" + VERSION
 ICON_CDN = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/"
 LOGO_TTL = 7 * 86400
+
+
+def read_agent_version():
+    try:
+        with open(AGENT_FILE) as f:
+            m = re.search(r'^AGENT_VERSION="([^"]+)"', f.read(), re.M)
+        return m.group(1) if m else ""
+    except OSError:
+        return ""
+
+
+AGENT_VERSION = read_agent_version()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("version_tracker")
@@ -94,6 +106,12 @@ def slug(text):
 # --------------------------------------------------------------------------
 
 PRERELEASE_RE = re.compile(r"(alpha|beta|rc\d*|pre|preview|dev|nightly|snapshot)", re.I)
+VERSION_LIKE_RE = re.compile(r"^v?\d", re.I)   # "1.2", "v3"; not "latest", "lts" or "pg18"
+DATE_STAMP_RE = re.compile(r"^\d{8,}$")        # releases named like 202611031105
+
+
+class NotFound(LookupError):
+    """The project doesn't exist, or has no releases or version tags."""
 
 
 def clean_tag(tag):
@@ -135,7 +153,7 @@ def status_for(current, latest):
 def highest_tag(names):
     tags = [t for t in names if parse_nums(t) and not is_prerelease(t)]
     if not tags:
-        raise LookupError("no releases or version tags")
+        raise NotFound("no releases or version tags")
     best = tags[0]
     for t in tags[1:]:
         if compare_versions(t, best) == 1:
@@ -222,7 +240,7 @@ def latest_github(p, opts):
 
     code, body, hdrs = http_get(base + "/tags?per_page=100", headers)
     if code == 404:
-        raise LookupError("repo not found on GitHub")
+        raise NotFound("repo not found on GitHub")
     if code != 200:
         fail(code, hdrs)
     tag = highest_tag([t.get("name", "") for t in json.loads(body)])
@@ -252,7 +270,7 @@ def latest_gitlab(p, opts):
 
     def fail(code):
         if code == 404:
-            raise LookupError("project not found on %s (private? add a GitLab token)" % p["host"])
+            raise NotFound("project not found on %s (private? add a GitLab token)" % p["host"])
         if code in (401, 403):
             raise LookupError("access denied by %s (check the GitLab token)" % p["host"])
         if code == 429:
@@ -310,7 +328,7 @@ def html_attr(attrs, name):
     return m.group(1).strip() if m else ""
 
 
-def readme_logo(text, base, name=""):
+def readme_logo(text, base, name="", root=""):
     """The likeliest logo among the first pictures of a README, skipping badges.
     A picture named after the project wins (linuxserver.io READMEs start with
     their own logo, then the app's), then one called logo or icon."""
@@ -323,6 +341,8 @@ def readme_logo(text, base, name=""):
             src, alt = m.group(2).strip(), m.group(1)
         if not src or NOT_LOGO_RE.search(src) or NOT_LOGO_RE.search(alt):
             continue
+        if src.startswith("/") and not src.startswith("//") and root:
+            src = root + src.lstrip("/")  # relative to the repo, not the web server
         url = urllib.parse.urljoin(base, src)
         url = re.sub(r"^(https://github\.com/[^/]+/[^/]+)/blob/", r"\1/raw/", url)
         if url.startswith(("http://", "https://")):
@@ -343,7 +363,10 @@ def logo_github(p, opts):
     if code == 200:
         r = json.loads(body)
         text = base64.b64decode(r.get("content") or "").decode("utf-8", "replace")
-        url = readme_logo(text, r.get("download_url") or p["web"] + "/raw/HEAD/", p["path"].split("/")[1])
+        base = r.get("download_url") or p["web"] + "/raw/HEAD/" + (r.get("path") or "")
+        path = r.get("path") or ""
+        root = base[: -len(path)] if path and base.endswith(path) else ""
+        url = readme_logo(text, base, p["path"].split("/")[1], root)
         if url:
             return url
     elif code != 404:
@@ -373,12 +396,36 @@ def logo_gitlab(p, opts):
         code, text, _ = http_get("%s/repository/files/%s/raw?ref=%s" % (
             api, urllib.parse.quote(path, safe=""), urllib.parse.quote(branch, safe="")), headers)
         if code == 200:
-            url = readme_logo(text, "%s/-/raw/%s/%s" % (p["web"], branch, path), p["path"].rsplit("/", 1)[-1])
+            root = "%s/-/raw/%s/" % (p["web"], branch)
+            url = readme_logo(text, root + path, p["path"].rsplit("/", 1)[-1], root)
             if url:
                 return url
     ns = proj.get("namespace") or {}
     if ns.get("kind") == "group" and ns.get("avatar_url"):
         return urllib.parse.urljoin(root, ns["avatar_url"])
+    return ""
+
+
+def guess_project(image):
+    """A likely source repo for a container image that has no source label,
+    e.g. ghcr.io/owner/app -> github.com/owner/app, redis -> github.com/redis/redis.
+    The add-on drops the guess if the repo doesn't exist or has no releases."""
+    ref = re.sub(r"@.*$", "", str(image or "").strip())
+    ref = re.sub(r":[^/:]*$", "", ref)  # the tag
+    parts = [x for x in ref.split("/") if x]
+    if not parts or ref.startswith("sha256"):
+        return ""
+    registry = "docker.io"
+    if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
+        registry, parts = parts[0].lower(), parts[1:]
+    if registry in ("docker.io", "index.docker.io", "registry-1.docker.io") and (len(parts) == 1 or parts[0] == "library"):
+        return "https://github.com/%s/%s" % (parts[-1], parts[-1])
+    if registry == "lscr.io" and len(parts) == 2 and parts[0] == "linuxserver":
+        return "https://github.com/linuxserver/docker-" + parts[1]
+    if registry == "registry.gitlab.com" and len(parts) >= 2:
+        return "https://gitlab.com/%s/%s" % (parts[0], parts[1])
+    if registry in ("docker.io", "index.docker.io", "registry-1.docker.io", "ghcr.io", "quay.io") and len(parts) >= 2:
+        return "https://github.com/%s/%s" % (parts[0], parts[1])
     return ""
 
 
@@ -394,8 +441,10 @@ def lookup_logo(link, opts):
 # Every entry has: id, source ("project" or "mqtt"), name, current, url,
 # latest_manual (typed by hand, or sent by an agent), found_* (from a
 # GitHub/GitLab lookup, including found_picture and logo_checked), picture.
-# MQTT entries also carry machine, kind, topic, pending, security, packages
-# and last_seen.
+# MQTT entries also carry machine, kind, topic, pending, security, packages,
+# last_seen, and for containers image, image_created and url_guessed.
+# What's set on the page for an entry (notes; for reported entries also a
+# picture and link) is kept in Settings and laid over it by Tracker.merged().
 
 KIND_LABELS = {"proxmox": "Proxmox", "debian": "Debian", "ubuntu": "Ubuntu", "docker": "Docker", "app": "App"}
 KIND_ICONS = {"proxmox": "proxmox", "docker": "docker", "debian": "debian-linux", "ubuntu": "ubuntu-linux"}
@@ -405,13 +454,43 @@ def effective_latest(e):
     return e.get("latest_manual") or e.get("found_version") or ""
 
 
+def generic_picture(e):
+    if e.get("source") != "mqtt":
+        return ""
+    icon = KIND_ICONS.get(e.get("kind") or "") or ("linux" if is_system(e) else "")
+    return ICON_CDN + icon + ".webp" if icon else ""
+
+
 def picture_for(e):
     """A picture set by hand or by the agent, else the project's logo, else a generic one for machines."""
-    pic = e.get("picture") or e.get("found_picture") or ""
-    if not pic and e.get("source") == "mqtt":
-        icon = KIND_ICONS.get(e.get("kind") or "") or ("linux" if (e.get("topic") or "").endswith("/system") else "")
-        pic = ICON_CDN + icon + ".webp" if icon else ""
+    pic = e.get("picture") or e.get("found_picture") or generic_picture(e)
     return pic if pic.startswith(("http://", "https://")) else ""
+
+
+def is_system(e):
+    return (e.get("topic") or "").endswith("/system")
+
+
+def iso_ts(text):
+    """Seconds since 1970 for an ISO time like 2026-04-30T10:00:00Z (UTC), or None."""
+    try:
+        return datetime.strptime(str(text)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def built_after_release(e, latest):
+    """For a container whose tag isn't a version (latest, lts, pg18) or whose
+    project names releases by date: is its image newer than the latest release?
+    None when that can't be told."""
+    if not e.get("image_created") or e.get("latest_manual"):
+        return None
+    if VERSION_LIKE_RE.match(e.get("current") or "") and not DATE_STAMP_RE.match(clean_tag(latest)):
+        return None
+    built, released = iso_ts(e["image_created"]), iso_ts(e.get("found_released"))
+    if built is None or released is None:
+        return None
+    return built >= released - 86400  # images are often built just before the release is published
 
 
 def source_label(e):
@@ -439,6 +518,11 @@ def evaluate(e, opts):
         status = "Error" if e.get("error") else "Checking"
     elif latest:
         status = status_for(current, latest)
+        by_date = built_after_release(e, latest)
+        if by_date is not None:
+            status = "Up to date" if by_date else "Update available"
+    elif e.get("source") == "mqtt" and e.get("kind") in ("docker", "app"):
+        status = "No project link"
     else:
         status = "Up to date"
     if not stale and pending > 0:
@@ -458,7 +542,7 @@ def evaluate(e, opts):
         ha_latest = current
 
     return {"status": status, "latest": latest, "ha_latest": ha_latest, "stale": stale,
-            "source_label": source_label(e)}
+            "source_label": source_label(e), "by_date": latest and built_after_release(e, latest) is not None}
 
 
 def build_summary(e, ev, opts):
@@ -478,6 +562,11 @@ def build_summary(e, ev, opts):
         return head + (": " + ", ".join(pkgs) if pkgs else ".")
     if e.get("error"):
         return "Last check failed: " + e["error"]
+    if ev["status"] == "No project link":
+        return "No project link for %s, so its releases aren't checked. Add one on the Version Tracker page." % e.get("name")
+    if ev["by_date"]:
+        return "The %s image was built %s; %s was released %s." % (
+            e.get("name"), e["image_created"][:10], ev["latest"], (e.get("found_released") or "")[:10])
     if ev["status"] == "Update available" and ev["latest"]:
         when = (e.get("found_released") or "")[:10]
         return "%s %s is available%s." % (e.get("name"), ev["latest"], " (released %s)" % when if when else "")
@@ -541,21 +630,23 @@ class Store:
 
 class Settings:
     """Things set on the web page: the MQTT login machines use, the secret in
-    the one-line installer link, and ignored entries. Ignored ids are kept
-    here rather than on the entry, so a machine item stays ignored after its
-    agent clears it and reports it again."""
+    the one-line installer link, ignored entries, and per-entry overrides
+    (notes, and a picture and link for reported entries). They're kept here
+    rather than on the entry, so they survive an agent clearing an item and
+    reporting it again."""
 
     def __init__(self, path):
         self.path = path
         self.lock = threading.RLock()
         self.data = {"agent": {"broker": "", "port": 1883, "username": "", "password": ""},
-                     "install_token": "", "ignored": []}
+                     "install_token": "", "ignored": [], "overrides": {}}
         try:
             with open(path) as f:
                 saved = json.load(f)
             self.data["agent"].update(saved.get("agent") or {})
             self.data["install_token"] = saved.get("install_token") or ""
             self.data["ignored"] = list(saved.get("ignored") or [])
+            self.data["overrides"] = dict(saved.get("overrides") or {})
         except FileNotFoundError:
             pass
         except (ValueError, AttributeError) as err:
@@ -605,6 +696,28 @@ class Settings:
     def ignored(self):
         with self.lock:
             return list(self.data["ignored"])
+
+    def override(self, eid):
+        with self.lock:
+            return dict(self.data["overrides"].get(eid) or {})
+
+    def set_override(self, eid, **fields):
+        """Change some of an entry's overrides; empty values are dropped."""
+        with self.lock:
+            o = dict(self.data["overrides"].get(eid) or {}, **fields)
+            o = {k: v for k, v in o.items() if v}
+            if o:
+                self.data["overrides"][eid] = o
+            else:
+                self.data["overrides"].pop(eid, None)
+            self.save()
+
+    def forget(self, eid):
+        with self.lock:
+            self.data["overrides"].pop(eid, None)
+            if eid in self.data["ignored"]:
+                self.data["ignored"].remove(eid)
+            self.save()
 
     def set_ignored(self, eid, ignored):
         with self.lock:
@@ -743,9 +856,23 @@ class Tracker:
             cfg["entity_picture"] = picture
         return cfg
 
+    def merged(self, e):
+        """The entry as shown: with the notes, picture and link set on the page."""
+        if not e:
+            return e
+        e = dict(e)
+        o = self.settings.override(e["id"])
+        if o.get("picture"):
+            e["picture"] = o["picture"]
+        if o.get("url"):
+            e.update(url=o["url"], url_guessed=False, url_set=True)
+        e["notes"] = o.get("notes", "")
+        return e
+
     def publish_entry(self, e):
         if self.settings.is_ignored(e["id"]):
             return
+        e = self.merged(e)
         t = self.topics(e["id"])
         ev = evaluate(e, self.opts)
         state = {"installed_version": e.get("current") or "unknown", "latest_version": ev["ha_latest"] or e.get("current") or "unknown",
@@ -756,6 +883,8 @@ class Tracker:
         attrs = {"status": ev["status"], "source": ev["source_label"], "project_url": e.get("url") or None,
                  "machine": e.get("machine") or None, "last_checked": iso(e.get("checked")) or None,
                  "last_seen": iso(e.get("last_seen")) or None}
+        if e.get("notes"):
+            attrs["notes"] = e["notes"]
         if e.get("source") == "mqtt":
             attrs.update(pending_packages=int(e.get("pending") or 0), security_updates=int(e.get("security") or 0))
         payloads = (json.dumps(self.discovery(e, t)), json.dumps(state), json.dumps(attrs))
@@ -809,20 +938,29 @@ class Tracker:
                 parse_project(url)
             except ValueError:
                 url = ""
+        image = str(data.get("image") or "")
+        guessed = ""
+        if not url and image:
+            guessed = guess_project(image)
+            if guessed == e.get("guess_failed") and now_ts() - (e.get("guess_failed_at") or 0) < LOGO_TTL:
+                guessed = ""  # tried last time: no such repo, or no releases
+            url = guessed
         if url != e.get("url"):
-            e.update(found_picture="", logo_checked=0)
+            e.update(found_version="", found_released="", found_notes_url="", error="", checked=0,
+                     found_picture="", logo_checked=0)
         e.update(topic=suffix, machine=machine, name=str(data.get("name") or machine),
                  title=str(data.get("title") or "") or None, kind=str(data.get("kind") or ""),
                  current=installed, latest_manual=str(data.get("latest_version") or "").strip(),
                  url=url, pending=num(data.get("pending")), security=num(data.get("security")),
                  packages=[str(p) for p in (data.get("packages") or [])][:50],
                  picture=str(data.get("picture") or ""), release_url=str(data.get("release_url") or ""),
-                 summary=str(data.get("summary") or ""), last_seen=now_ts())
-        if not url:
-            e.update(found_version="", found_released="", found_notes_url="", error="")
+                 summary=str(data.get("summary") or ""), last_seen=now_ts(), url_guessed=bool(guessed),
+                 image=image, image_created=str(data.get("image_created") or ""),
+                 agent_version=str(data.get("agent_version") or ""))
         self.store.put(e)
         self.publish_entry(e)
-        if url and not e.get("latest_manual"):
+        e = self.merged(e)
+        if e.get("url") and not e.get("latest_manual"):
             self.enqueue(eid)
 
     # ---- Lookups ----
@@ -843,7 +981,7 @@ class Tracker:
                 log.exception("Check failed for %s", eid)
 
     def check_entry(self, eid, force=False):
-        e = self.store.get(eid)
+        e = self.merged(self.store.get(eid))
         if not e or not e.get("url"):
             return
         try:
@@ -858,6 +996,8 @@ class Tracker:
         if force or not hit or now_ts() - hit[0] > ttl:
             try:
                 result = lookup_latest(e["url"], self.opts)
+            except NotFound as err:
+                result = {"error": str(err), "not_found": True}
             except (LookupError, ValueError) as err:
                 result = {"error": str(err)}
             except Exception as err:  # malformed JSON etc.
@@ -866,6 +1006,13 @@ class Tracker:
             with self.cache_lock:
                 self.cache[key] = hit
         result = hit[1]
+        if result.get("not_found") and e.get("url_guessed"):
+            log.info("No releases at %s (guessed from the image of %s); add a link on the page", e["url"], e["name"])
+            e = self.store.update(eid, url="", url_guessed=False, guess_failed=e["url"], guess_failed_at=now_ts(),
+                                  error="", checked=hit[0])
+            if e:
+                self.publish_entry(e)
+            return
         if "error" in result:
             fields = {"error": result["error"]}
         else:
@@ -894,7 +1041,7 @@ class Tracker:
 
     def check_all(self, force=False):
         self.last_full_check = now_ts()
-        for e in self.store.all():
+        for e in map(self.merged, self.store.all()):
             if e.get("url") and not e.get("latest_manual"):
                 self.enqueue(e["id"], force)
 
@@ -909,6 +1056,8 @@ class Tracker:
     # ---- Changes from the web page ----
 
     def add_or_edit(self, data, eid=None):
+        if eid and (self.store.get(eid) or {}).get("source") == "mqtt":
+            return self.edit_reported(eid, data)
         name = str(data.get("name") or "").strip()
         if not name:
             raise ValueError("Name is required")
@@ -921,6 +1070,7 @@ class Tracker:
         picture = str(data.get("picture") or "").strip()
         if picture and not picture.startswith(("http://", "https://")):
             raise ValueError("Picture must be an http(s) link")
+        notes = str(data.get("notes") or "").strip()[:1000]
         fields = {"name": name, "current": str(data.get("current") or "").strip(), "url": url,
                   "latest_manual": latest, "picture": picture}
         if eid:
@@ -934,9 +1084,30 @@ class Tracker:
         else:
             e = dict(fields, id="p_" + uuid.uuid4().hex[:8], source="project", created=now_ts())
             self.store.put(e)
+        self.settings.set_override(e["id"], notes=notes)
         self.publish_entry(e)
         if url:
             self.enqueue(e["id"])
+        return e
+
+    def edit_reported(self, eid, data):
+        """Picture, link and notes for an entry a machine reports. They're kept
+        apart from what the machine sends, so the next report doesn't undo them."""
+        picture = str(data.get("picture") or "").strip()
+        if picture and not picture.startswith(("http://", "https://")):
+            raise ValueError("Picture must be an http(s) link")
+        url = str(data.get("url") or "").strip()
+        if url:
+            parse_project(url)
+        old = self.settings.override(eid)
+        self.settings.set_override(eid, picture=picture, url=url, notes=str(data.get("notes") or "").strip()[:1000])
+        if old.get("url", "") != url:
+            self.store.update(eid, found_version="", found_released="", found_notes_url="", error="", checked=0,
+                              found_picture="", logo_checked=0, guess_failed="")
+        e = self.merged(self.store.get(eid))
+        self.publish_entry(e)
+        if e.get("url") and not e.get("latest_manual"):
+            self.enqueue(eid, force=True)
         return e
 
     def mark_updated(self, eid):
@@ -958,7 +1129,7 @@ class Tracker:
         if e.get("source") == "mqtt" and e.get("topic"):
             self.pub(BASE + "/report/" + e["topic"], "")  # clear the retained report too
         else:
-            self.settings.set_ignored(eid, False)
+            self.settings.forget(eid)  # a machine item keeps its settings, as it may come back
         return e
 
     def set_ignored(self, eid, ignored):
@@ -1000,6 +1171,8 @@ class Tracker:
         return text
 
     def view(self, e):
+        o = self.settings.override(e["id"])
+        e = self.merged(e)
         ev = evaluate(e, self.opts)
         return {"id": e["id"], "source": e.get("source"), "source_label": ev["source_label"],
                 "name": e.get("name"), "machine": e.get("machine") or "", "kind": e.get("kind") or "",
@@ -1009,7 +1182,11 @@ class Tracker:
                 "project_web": self._web(e.get("url")), "notes_url": e.get("found_notes_url") or e.get("release_url") or "",
                 "released": e.get("found_released") or "", "checked": iso(e.get("checked")),
                 "last_seen": iso(e.get("last_seen")), "error": e.get("error") or "",
-                "picture": picture_for(e), "picture_manual": e.get("picture") or "",
+                "picture": picture_for(e), "fallback_picture": generic_picture(e),
+                "picture_manual": o.get("picture", "") if e.get("source") == "mqtt" else e.get("picture") or "",
+                "url_manual": o.get("url", ""), "url_guessed": bool(e.get("url_guessed")), "notes": e.get("notes") or "",
+                "image": e.get("image") or "", "image_created": e.get("image_created") or "", "by_date": bool(ev["by_date"]),
+                "is_system": is_system(e), "agent_version": e.get("agent_version") or "",
                 "ignored": self.settings.is_ignored(e["id"]),
                 "latest_manual": e.get("latest_manual") if e.get("source") == "project" else "",
                 "summary": build_summary(e, ev, self.opts)}
@@ -1025,7 +1202,7 @@ class Tracker:
         return {"version": VERSION, "mqtt_connected": self.connected, "broker": self.broker,
                 "report_topic": BASE + "/report/<machine>/<item>", "stale_hours": self.opts["stale_hours"],
                 "check_interval_hours": self.opts["check_interval_hours"],
-                "github_token": bool(self.opts.get("github_token")),
+                "github_token": bool(self.opts.get("github_token")), "agent_version": AGENT_VERSION,
                 "last_full_check": iso(self.last_full_check)}
 
     def machine_setup(self):

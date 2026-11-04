@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.0
+
+- Every running Docker container is reported now. Where an image has no
+  source label, the project is guessed from the image name (e.g.
+  `ghcr.io/owner/app` → `github.com/owner/app`), and you can set the link
+  yourself. Re-run the install script on your machines to get the new agent;
+  the page flags machines whose agent is out of date.
+- Containers tagged `latest`, `lts` and the like are compared by image build
+  date against the latest release, instead of showing "Check manually".
+- Edit (✎) on every row: set a picture, notes, and for reported containers
+  and apps a project link. They're kept when the machine reports again.
+- Fixed logos linked from the repo root in a README (e.g. immich-kiosk), and
+  a missing picture now falls back to the generic icon.
+- Fixed hidden fields in dialogs still showing.
+
 ## 1.1.0
 
 - **Add a machine** now stores the MQTT login your machines use, and gives a

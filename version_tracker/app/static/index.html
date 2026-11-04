@@ -23,6 +23,7 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }  /* label { display: block } would otherwise win */
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.45 Roboto, "Segoe UI", system-ui, -apple-system, sans-serif; }
   .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 16px 48px; }
@@ -54,6 +55,8 @@
               place-items: center; font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 1px; }
   .name strong { font-weight: 500; display: block; }
   .name small, td small { color: var(--muted); font-size: 12px; display: block; overflow-wrap: anywhere; }
+  .name small.notes { color: var(--text); opacity: .8; font-style: italic; white-space: pre-line; margin-top: 2px; }
+  small.warn-text { color: var(--warn); }
   .ver { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
   .chip { display: inline-block; background: var(--chip); border-radius: 6px; padding: 1px 7px; font-size: 12px; white-space: nowrap; }
   .pill { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 500; white-space: nowrap; }
@@ -91,10 +94,11 @@
   .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); }
   label { display: block; margin-top: 14px; font-weight: 500; }
   label .hint { font-weight: 400; color: var(--muted); font-size: 12px; display: block; }
-  input { width: 100%; font: inherit; padding: 8px 10px; margin-top: 4px; border-radius: 8px; border: 1px solid var(--line);
+  input, textarea { width: 100%; font: inherit; padding: 8px 10px; margin-top: 4px; border-radius: 8px; border: 1px solid var(--line);
           background: var(--bg); color: var(--text); }
-  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  input::placeholder { color: var(--muted); opacity: .55; }
+  textarea { resize: vertical; min-height: 64px; }
+  input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  input::placeholder, textarea::placeholder { color: var(--muted); opacity: .55; }
   .form-error { color: var(--err); margin-top: 12px; min-height: 1em; }
   ol.steps { padding-left: 20px; margin: 12px 0 0; }
   ol.steps li { margin-bottom: 14px; }
@@ -162,24 +166,27 @@
   <form id="entry-form" method="dialog">
     <div class="dlg-body">
       <h2 id="entry-title">Add project</h2>
-      <p class="muted" style="margin:0">It shows up in Home Assistant under Settings → Updates whenever a newer version exists.</p>
-      <label>Name
+      <p class="muted" style="margin:0" id="entry-intro"></p>
+      <label id="name-wrap">Name
         <input name="name" required autocomplete="off" placeholder="Jellyfin">
       </label>
-      <label>Current version
+      <label id="current-wrap">Current version
         <span class="hint">What you're running now.</span>
         <input name="current" autocomplete="off" placeholder="10.10.7">
       </label>
-      <label>Project link
-        <span class="hint">GitHub or GitLab (self-hosted works too). Leave blank to track something by hand.</span>
+      <label id="url-wrap">Project link
+        <span class="hint" id="url-hint"></span>
         <input name="url" autocomplete="off" placeholder="https://github.com/jellyfin/jellyfin">
       </label>
       <label id="latest-wrap">Latest version
         <span class="hint">Only used without a project link, e.g. for router firmware.</span>
         <input name="latest" autocomplete="off" placeholder="1.2.3">
       </label>
-      <label>Picture link <span class="hint">Optional. Leave blank to use the logo from the project's README.</span>
+      <label>Picture link <span class="hint">Optional. Leave blank to find one automatically: the project's logo, or a generic picture.</span>
         <input name="picture" autocomplete="off" placeholder="https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/jellyfin.webp">
+      </label>
+      <label>Notes <span class="hint">Just for you, e.g. what it is or where it lives. Also shown in Home Assistant's attributes.</span>
+        <textarea name="notes" rows="3" maxlength="1000" placeholder="HP EliteDesk G3 in the closet"></textarea>
       </label>
       <div class="form-error" id="entry-error"></div>
     </div>
@@ -263,6 +270,12 @@ const ICONS = {
   show: 'M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z'
 };
 
+function imgError(img) {  // logo gone? try the generic picture, then a letter
+  const fb = img.dataset.fallback;
+  if (fb && img.src !== fb) { img.dataset.fallback = ''; img.src = fb; return; }
+  img.replaceWith(Object.assign(document.createElement('span'), { className: 'ph', textContent: img.dataset.letter }));
+}
+
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : '';
 const icon = (name, label, action, id) =>
@@ -310,11 +323,15 @@ function renderTabs() {
 function row(e) {
   const isSystem = e.source === 'mqtt' && e.name === e.machine;
   const sub = e.source === 'mqtt'
-    ? (isSystem ? (e.kind ? e.source_label + ' host' : 'Machine') : 'on ' + e.machine)
+    ? (isSystem ? (e.kind ? e.source_label + ' host' : 'Machine') : 'on ' + e.machine + (e.image ? ' · ' + e.image : ''))
     : (e.project_web ? e.project_web.replace(/^https?:\/\//, '') : 'Tracked by hand');
+  const letter = esc((e.name || '?')[0].toUpperCase());
   const pic = safeUrl(e.picture)
-    ? `<img src="${esc(e.picture)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'ph',textContent:'${esc((e.name || '?')[0].toUpperCase())}'}))">`
-    : `<span class="ph">${esc((e.name || '?')[0].toUpperCase())}</span>`;
+    ? `<img src="${esc(e.picture)}" alt="" loading="lazy" data-letter="${letter}" data-fallback="${esc(safeUrl(e.fallback_picture))}" onerror="imgError(this)">`
+    : `<span class="ph">${letter}</span>`;
+  const agentOld = e.is_system && state.info.agent_version && e.agent_version !== state.info.agent_version;
+  const extra = (e.notes ? `<small class="notes">${esc(e.notes)}</small>` : '') +
+    (agentOld ? `<small class="warn-text" title="Agent ${esc(e.agent_version || '1.1 or older')}; this add-on ships ${esc(state.info.agent_version)}">Agent out of date: re-run the install script on it</small>` : '');
 
   let latest = e.latest && e.latest !== e.current ? `<span class="ver">${esc(e.latest)}</span>` : (e.latest ? `<span class="ver muted">${esc(e.latest)}</span>` : '<span class="muted">—</span>');
   if (e.pending) {
@@ -325,8 +342,11 @@ function row(e) {
     (e.error ? `<small title="${esc(e.error)}">${esc(e.error)}</small>` : '');
   const links = [
     safeUrl(e.notes_url) && `<a href="${esc(e.notes_url)}" target="_blank" rel="noopener">Release notes ↗</a>`,
-    safeUrl(e.project_web) && `<a href="${esc(e.project_web)}" target="_blank" rel="noopener">Project ↗</a>`
+    safeUrl(e.project_web) && `<a href="${esc(e.project_web)}" target="_blank" rel="noopener">Project ↗</a>`,
+    e.url_guessed && e.project_web && '<small title="Found from the image name. Use Edit to set a different link.">guessed from the image</small>'
   ].filter(Boolean).join('') || '<span class="muted">—</span>';
+  const current = (esc(e.current) || '<span class="muted">—</span>') +
+    (e.by_date && e.image_created ? `<small>built ${esc(day(e.image_created))}</small>` : '');
   const updated = e.source === 'mqtt'
     ? `seen ${ago(e.last_seen)}${e.checked ? `<small>checked ${ago(e.checked)}</small>` : ''}`
     : (e.checked ? `checked ${ago(e.checked)}` : (e.url ? 'not checked yet' : '<span class="muted">—</span>'));
@@ -334,15 +354,15 @@ function row(e) {
   const acts = [];
   if (e.source === 'project' && e.status === 'Update available' && e.latest) acts.push(icon('done', 'Mark as updated', 'mark', e.id));
   if (e.url) acts.push(icon('check', 'Check now', 'check', e.id));
-  if (e.source === 'project') acts.push(icon('edit', 'Edit', 'edit', e.id));
+  acts.push(icon('edit', e.source === 'mqtt' ? 'Edit picture, link and notes' : 'Edit', 'edit', e.id));
   acts.push(e.ignored ? icon('show', 'Track again', 'unignore', e.id)
                       : icon('hide', 'Ignore (hide here and in Home Assistant)', 'ignore', e.id));
   acts.push(icon('del', e.source === 'mqtt' ? 'Remove (returns if the machine reports again)' : 'Delete', 'delete', e.id));
 
   return `<tr>
-    <td class="c-name"><div class="name">${pic}<div><strong>${esc(e.name)}</strong><small>${esc(sub)}</small></div></div></td>
+    <td class="c-name"><div class="name">${pic}<div><strong>${esc(e.name)}</strong><small>${esc(sub)}</small>${extra}</div></div></td>
     <td data-label="Source"><span class="chip">${esc(e.source_label)}</span></td>
-    <td data-label="Current"><span class="ver">${esc(e.current) || '<span class="muted">—</span>'}</span></td>
+    <td data-label="Current"><div class="ver">${current}</div></td>
     <td data-label="Latest"><div>${latest}</div></td>
     <td data-label="Status"><div>${pill}</div></td>
     <td data-label="Released">${esc(day(e.released)) || '<span class="muted">—</span>'}</td>
@@ -397,21 +417,36 @@ async function load() {
 
 // ---- Add / edit ----
 const form = $('#entry-form');
-function syncLatest() { $('#latest-wrap').hidden = form.url.value.trim() !== ''; }
+function syncLatest() { $('#latest-wrap').hidden = state.reported || form.url.value.trim() !== ''; }
 form.url.addEventListener('input', syncLatest);
 
 function openEntry(e) {
+  const reported = !!e && e.source === 'mqtt';
   state.editing = e ? e.id : null;
+  state.reported = reported;
   $('#entry-title').textContent = e ? 'Edit ' + e.name : 'Add project';
+  $('#entry-intro').textContent = reported
+    ? `Reported by ${e.machine}. What you set here is kept when it reports again.`
+    : 'It shows up in Home Assistant under Settings → Updates whenever a newer version exists.';
+  $('#name-wrap').hidden = $('#current-wrap').hidden = reported;
+  form.name.required = !reported;
+  $('#url-wrap').hidden = reported && e.is_system;
+  $('#url-hint').textContent = !reported
+    ? 'GitHub or GitLab (self-hosted works too). Leave blank to track something by hand.'
+    : 'Where its releases come from. Leave blank to use ' + (e.url_manual || !e.url ? 'what the machine reports.'
+      : (e.url_guessed ? 'the one guessed from the image: ' : 'the one the machine reports: ') + e.url.replace(/^https?:\/\//, ''));
   form.name.value = e ? e.name : '';
   form.current.value = e ? e.current : '';
-  form.url.value = e ? e.url : '';
+  form.url.value = e ? (reported ? e.url_manual : e.url) : '';
+  form.url.placeholder = reported && e.url && !e.url_manual ? e.url : 'https://github.com/jellyfin/jellyfin';
   form.latest.value = e ? (e.latest_manual || '') : '';
   form.picture.value = e ? (e.picture_manual || '') : '';
+  form.picture.placeholder = e && e.picture && !e.picture_manual ? e.picture : 'https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/jellyfin.webp';
+  form.notes.value = e ? (e.notes || '') : '';
   $('#entry-error').textContent = '';
   syncLatest();
   $('#dlg-entry').showModal();
-  form.name.focus();
+  (reported ? form.picture : form.name).focus();
 }
 
 form.addEventListener('submit', async ev => {

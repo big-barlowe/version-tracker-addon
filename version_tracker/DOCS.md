@@ -95,10 +95,24 @@ The script refreshes the package lists itself, at most every `REFRESH_HOURS`
   OS version, plus how many apt packages are waiting and which ones. The
   entity shows as outdated when any packages are waiting, e.g.
   `9.1.1 → 9.1.2 (+12 packages)`.
-- **Docker containers**: each running container whose image carries an
-  `org.opencontainers.image.source` label pointing to GitHub or GitLab, with a
-  version label or a version tag. Most linuxserver.io and GHCR images do. For
-  any other container, add labels to it:
+- **Docker containers**: every running container, with its version, image
+  and when the image was built. Where releases come from, in this order:
+  1. a project link you set on the page (✎ on its row),
+  2. the image's `org.opencontainers.image.source` label (most linuxserver.io
+     and many GHCR images have one), or your own `version_tracker.url` label,
+  3. a guess from the image name: `ghcr.io/owner/app` and Docker Hub
+     `owner/app` → `github.com/owner/app`, `redis` → `github.com/redis/redis`,
+     `lscr.io/linuxserver/app` → `github.com/linuxserver/docker-app`. A guess
+     is marked "guessed from the image", and is dropped if that repo doesn't
+     exist or has no releases.
+
+  Without any of these it shows **No project link** until you add one. The
+  version is the image's version label or its tag. When the tag isn't a
+  version (`latest`, `lts`, `pg18`), or the project names its releases by
+  date, the image's build date is compared with the latest release instead:
+  built after the release counts as up to date.
+
+  Labels you can add to a container:
 
   ```yaml
   labels:
@@ -116,6 +130,12 @@ The script refreshes the package lists itself, at most every `REFRESH_HOURS`
     "Jellyfin|$(jellyfin --version 2>/dev/null | awk '{print $NF}')|https://github.com/jellyfin/jellyfin"
   )
   ```
+
+### Updating the agent
+
+When a new version of the app changes the agent, machines running the old
+one show **Agent out of date** on the page. Run the install script (or
+one-line command) on them again; it keeps the name and settings.
 
 ### Machines that stop reporting
 
@@ -137,11 +157,16 @@ them; press the eye there to track one again.
 To stop a container being reported at all, give it the
 `version_tracker.ignore: "true"` label instead.
 
-## Pictures
+## Pictures and notes
+
+Press ✎ on any row to set a picture link or write notes, e.g. "HP EliteDesk
+G3 in the closet" for a Proxmox host. On things a machine reports you can
+also set the project link. These are kept when the machine reports again,
+and the notes also appear as a `notes` attribute in Home Assistant.
 
 Every item gets a picture, both on the page and in Home Assistant:
 
-1. a picture link you set (on a project, or `PICTURE` in a machine's settings),
+1. a picture link you set (with ✎, or `PICTURE` in a machine's settings),
 2. otherwise the project's logo: the first picture near the top of its README
    that isn't a badge (one named after the project, or called logo or icon,
    is preferred), or else the GitHub organisation's or GitLab project's

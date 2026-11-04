@@ -45,6 +45,15 @@ version_tracker/
   Proxmox), `docker_<name>` and `app_<name>`. If a report has a `project_url`
   and no `latest_version`, the add-on looks up the latest release itself. An
   empty retained payload removes the item.
+- **Containers:** the agent reports every running container (`image`,
+  `image_created`, version label or tag). With no `project_url`,
+  `guess_project()` derives one from the image name (`url_guessed`); a
+  `NotFound` lookup drops the guess (`guess_failed`, retried weekly). When
+  the tag isn't version-like or releases are date stamps,
+  `built_after_release()` compares image build date with release date.
+- **Agent version:** `AGENT_VERSION` in vt-agent.sh, sent with the `system`
+  item; the GUI flags machines whose agent differs from the bundled one.
+  Bump it whenever vt-agent.sh changes.
 - For every entry the add-on publishes:
   - discovery: `homeassistant/update/version_tracker_<id>/config`
   - state: `version_tracker/entity/<id>/state` (JSON: installed_version,
@@ -62,9 +71,11 @@ version_tracker/
   `found_picture` (first non-badge image near the top of the README, else
   the GitHub org / GitLab project avatar; looked up in `check_entry`, at most
   weekly per project), else a dashboard-icons picture by kind for machines.
-- **Ignored** ids live in `/data/settings.json` (not on the entry), so a
-  machine item stays ignored after its agent clears and re-reports it.
-  `publish_entry` skips them; ignoring clears their retained topics.
+- **Ignored** ids and **overrides** (notes; for reported entries also
+  picture and url) live in `/data/settings.json`, not on the entry, so they
+  survive the agent clearing and re-reporting an item. `Tracker.merged()`
+  lays overrides over an entry; `publish_entry`, `view`, `check_entry` and
+  `check_all` all work on the merged entry. Ignored entries aren't published.
 - **Machine setup:** the login machines use (broker, port, user, password)
   is saved from the GUI to `/data/settings.json` (mode 600). `agent_conf()`
   and `installer()` build the settings file and `vt-install.sh` from it.
@@ -129,6 +140,12 @@ Tested with Docker on an arm64 Mac (2026-11-04):
   appeared as `update.*` with the right on/off state; mark-updated, delete
   (entity and device removed), agent-cleared items, LWT → `unavailable`, and
   add-on restart all behaved correctly, with no warnings in either log.
+
+1.2.0: the owner's real container images run on local Docker (redis,
+pgvector, metube, portainer-ce, ddns-updater, immich postgres), reported by
+the agent through the Docker socket: link guessing, failed-guess drop,
+date-based status, overrides kept through re-report and clear + re-report,
+notes and pictures in HA attributes, GUI screenshots.
 
 1.1.0, same setup (mock Supervisor also answering `/addons/self/info`):
 

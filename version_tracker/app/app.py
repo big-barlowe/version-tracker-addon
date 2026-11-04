@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("VT_DATA_DIR", "/data")
 OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")
@@ -511,6 +511,7 @@ def evaluate(e, opts):
     pending = int(e.get("pending") or 0)
     stale = (e.get("source") == "mqtt" and
              now_ts() - (e.get("last_seen") or 0) > float(opts["stale_hours"]) * 3600)
+    pinned = bool(current) and e.get("pinned") == current  # a pin lapses once the version changes
 
     if stale:
         status = "Not reporting"
@@ -527,6 +528,8 @@ def evaluate(e, opts):
         status = "Up to date"
     if not stale and pending > 0:
         status = "Update available"
+    if pinned and status in ("Update available", "Check manually"):
+        status = "Pinned"  # Home Assistant is told it's up to date (ha_latest = current)
 
     # The version string Home Assistant compares against the installed one.
     if status == "Not reporting":
@@ -542,7 +545,8 @@ def evaluate(e, opts):
         ha_latest = current
 
     return {"status": status, "latest": latest, "ha_latest": ha_latest, "stale": stale,
-            "source_label": source_label(e), "by_date": latest and built_after_release(e, latest) is not None}
+            "source_label": source_label(e), "by_date": latest and built_after_release(e, latest) is not None,
+            "pinned": pinned}
 
 
 def build_summary(e, ev, opts):
@@ -550,6 +554,11 @@ def build_summary(e, ev, opts):
     if ev["stale"]:
         seen = datetime.fromtimestamp(e.get("last_seen") or 0, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         return "No report from %s since %s. Check that it is on and its vt-agent cron job is running." % (machine, seen)
+    if ev["status"] == "Pinned":
+        avail = ev["latest"] if ev["latest"] and ev["latest"] != e.get("current") else ""
+        pending = int(e.get("pending") or 0)
+        return "Pinned at %s%s.%s" % (e.get("current"), "; %s is available" % avail if avail else "",
+                                      " %d package%s waiting." % (pending, "" if pending == 1 else "s") if pending else "")
     if e.get("summary"):
         return e["summary"]
     pending = int(e.get("pending") or 0)
@@ -631,7 +640,7 @@ class Store:
 class Settings:
     """Things set on the web page: the MQTT login machines use, the secret in
     the one-line installer link, ignored entries, and per-entry overrides
-    (notes, and a picture and link for reported entries). They're kept here
+    (notes, a pinned version, and a picture and link for reported entries). They're kept here
     rather than on the entry, so they survive an agent clearing an item and
     reporting it again."""
 
@@ -867,6 +876,7 @@ class Tracker:
         if o.get("url"):
             e.update(url=o["url"], url_guessed=False, url_set=True)
         e["notes"] = o.get("notes", "")
+        e["pinned"] = o.get("pinned", "")
         return e
 
     def publish_entry(self, e):
@@ -885,6 +895,8 @@ class Tracker:
                  "last_seen": iso(e.get("last_seen")) or None}
         if e.get("notes"):
             attrs["notes"] = e["notes"]
+        if ev["pinned"]:
+            attrs.update(pinned_version=e.get("current"), available_version=ev["latest"] or None)
         if e.get("source") == "mqtt":
             attrs.update(pending_packages=int(e.get("pending") or 0), security_updates=int(e.get("security") or 0))
         payloads = (json.dumps(self.discovery(e, t)), json.dumps(state), json.dumps(attrs))
@@ -1143,6 +1155,17 @@ class Tracker:
             self.publish_entry(e)
         return e
 
+    def set_pinned(self, eid, pinned):
+        """Pin an entry at its installed version, so a newer one isn't offered in Home Assistant."""
+        e = self.store.get(eid)
+        if not e:
+            raise KeyError(eid)
+        if pinned and not e.get("current"):
+            raise ValueError("Nothing to pin: no installed version is known")
+        self.settings.set_override(eid, pinned=e["current"] if pinned else "")
+        self.publish_entry(e)
+        return e
+
     # ---- Machine setup ----
 
     def agent_conf(self):
@@ -1187,7 +1210,7 @@ class Tracker:
                 "url_manual": o.get("url", ""), "url_guessed": bool(e.get("url_guessed")), "notes": e.get("notes") or "",
                 "image": e.get("image") or "", "image_created": e.get("image_created") or "", "by_date": bool(ev["by_date"]),
                 "is_system": is_system(e), "agent_version": e.get("agent_version") or "",
-                "ignored": self.settings.is_ignored(e["id"]),
+                "ignored": self.settings.is_ignored(e["id"]), "pinned": bool(ev["pinned"]),
                 "latest_manual": e.get("latest_manual") if e.get("source") == "project" else "",
                 "summary": build_summary(e, ev, self.opts)}
 
@@ -1272,6 +1295,8 @@ def make_handler(tracker):
                     return self.send(200, tracker.view(tracker.mark_updated(p[1])))
                 if len(p) == 3 and p[0] == "entries" and p[2] == "ignore" and method == "POST":
                     return self.send(200, tracker.view(tracker.set_ignored(p[1], bool(self.body().get("ignored", True)))))
+                if len(p) == 3 and p[0] == "entries" and p[2] == "pin" and method == "POST":
+                    return self.send(200, tracker.view(tracker.set_pinned(p[1], bool(self.body().get("pinned", True)))))
                 if len(p) == 3 and p[0] == "entries" and p[2] == "check" and method == "POST":
                     if not tracker.store.get(p[1]):
                         raise KeyError(p[1])

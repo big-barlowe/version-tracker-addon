@@ -67,12 +67,16 @@ version_tracker/
   compares against. Pending apt packages make it e.g. `9.1.2 (+3 packages)`.
   A stale machine gets `<installed> (not reporting)`, so it still shows in
   Updates.
+- **Pinning** stores the installed version as the `pinned` override. While
+  `current` still equals it, "Update available" / "Check manually" become
+  "Pinned" and HA gets `latest_version` = installed; the pin lapses on any
+  version change.
 - **Pictures:** `picture_for()` uses the entry's own picture, else
   `found_picture` (first non-badge image near the top of the README, else
   the GitHub org / GitLab project avatar; looked up in `check_entry`, at most
   weekly per project), else a dashboard-icons picture by kind for machines.
-- **Ignored** ids and **overrides** (notes; for reported entries also
-  picture and url) live in `/data/settings.json`, not on the entry, so they
+- **Ignored** ids and **overrides** (notes, `pinned`; for reported entries
+  also picture and url) live in `/data/settings.json`, not on the entry, so they
   survive the agent clearing and re-reporting an item. `Tracker.merged()`
   lays overrides over an entry; `publish_entry`, `view`, `check_entry` and
   `check_all` all work on the merged entry. Ignored entries aren't published.
@@ -146,6 +150,12 @@ pgvector, metube, portainer-ce, ddns-updater, immich postgres), reported by
 the agent through the Docker socket: link guessing, failed-guess drop,
 date-based status, overrides kept through re-report and clear + re-report,
 notes and pictures in HA attributes, GUI screenshots.
+
+1.3.0 (pinning), add-on against Mosquitto in Docker: pin/unpin through the
+API on a container, a Proxmox host with pending packages and a project;
+HA state and attributes; pin kept through clear + re-report and restart;
+lapsed on a version change and on mark-updated; GUI screenshotted (light,
+dark, 400px). Not yet seen in a real Home Assistant.
 
 1.1.0, same setup (mock Supervisor also answering `/addons/self/info`):
 

@@ -157,6 +157,24 @@ them; press the eye there to track one again.
 To stop a container being reported at all, give it the
 `version_tracker.ignore: "true"` label instead.
 
+## Pinning a version
+
+To stay on the version you have, even though a newer one is out, press the
+pin on its row. While it stays on that version:
+
+- its status is **Pinned** (yellow) instead of "Update available", and it
+  leaves the **Needs attention** tab;
+- Home Assistant shows it as up to date, so it isn't offered under
+  Settings → Updates. The entity's `pinned_version` and `available_version`
+  attributes say what's going on;
+- the page still shows the latest version, its release date and the release
+  notes link.
+
+Unlike ignoring, the item stays in the list and keeps being checked. The pin
+is kept when the machine reports again, and lifts by itself once the item is
+on a different version (you updated it, or marked a project as updated).
+Press the pin again to unpin.
+
 ## Pictures and notes
 
 Press ✎ on any row to set a picture link or write notes, e.g. "HP EliteDesk

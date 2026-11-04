@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0
+
+- Pin an item at its installed version with the pin on its row. While it
+  stays on that version, a newer release shows as **Pinned** (yellow) instead
+  of "Update available", and Home Assistant doesn't offer the update. The
+  latest version and release notes still show on the page. The pin is kept
+  when the machine reports again, and lifts by itself once the item is on a
+  different version.
+
 ## 1.2.0
 
 - Every running Docker container is reported now. Where an image has no

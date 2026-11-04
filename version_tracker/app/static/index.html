@@ -10,6 +10,7 @@
     --accent: #0a84c6; --accent-ink: #ffffff; --hover: #f0f3f6;
     --upd-bg: #fdecea; --upd: #b3261e; --ok-bg: #e7f5ec; --ok: #1e7a3c;
     --warn-bg: #fff4dc; --warn: #8a5800; --err-bg: #fdecea; --err: #b3261e;
+    --pin-bg: #fff3b0; --pin: #6e5800;
     --chip: #eef1f4; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     color-scheme: light;
   }
@@ -19,6 +20,7 @@
       --accent: #3aa8e8; --accent-ink: #0b1620; --hover: #23272b;
       --upd-bg: #3a1c1a; --upd: #ffb4ab; --ok-bg: #16301f; --ok: #8fd9a8;
       --warn-bg: #3a2c10; --warn: #f5c56b; --err-bg: #3a1c1a; --err: #ffb4ab;
+      --pin-bg: #3b3410; --pin: #f3d65e;
       --chip: #262a2e; color-scheme: dark;
     }
   }
@@ -65,6 +67,7 @@
   .s-warn { background: var(--warn-bg); color: var(--warn); }
   .s-err { background: var(--err-bg); color: var(--err); }
   .s-muted { background: var(--chip); color: var(--muted); }
+  .s-pin { background: var(--pin-bg); color: var(--pin); }
   details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
   .pkgs { font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 320px; margin-top: 4px; }
   a { color: var(--accent); text-decoration: none; }
@@ -74,6 +77,7 @@
   .icon { border: 0; background: transparent; padding: 6px; border-radius: 8px; color: var(--muted); line-height: 0; }
   .icon:hover { background: var(--chip); color: var(--text); }
   .icon svg { width: 18px; height: 18px; fill: currentColor; }
+  .icon.on { color: var(--pin); }
   .empty { padding: 40px 16px; text-align: center; color: var(--muted); }
   .note { margin: 0 0 12px; color: var(--muted); }
   .banner { border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--warn-bg); color: var(--warn); }
@@ -257,9 +261,9 @@
 <script>
 const $ = s => document.querySelector(s);
 const state = { entries: [], info: {}, filter: 'all', editing: null };
-const RANK = { 'Update available': 0, 'Not reporting': 1, 'Error': 2, 'Check manually': 3, 'Checking': 4 };
+const RANK = { 'Update available': 0, 'Not reporting': 1, 'Error': 2, 'Check manually': 3, 'Checking': 4, 'Pinned': 5 };
 const PILL = { 'Update available': 's-upd', 'Up to date': 's-ok', 'Not reporting': 's-warn',
-               'Check manually': 's-warn', 'Error': 's-err' };
+               'Check manually': 's-warn', 'Error': 's-err', 'Pinned': 's-pin' };
 const NEEDS_ATTENTION = new Set(['Update available', 'Not reporting', 'Error', 'Check manually']);
 const ICONS = {
   edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
@@ -267,6 +271,8 @@ const ICONS = {
   done: 'M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z',
   del: 'M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z',
   hide: 'M12 7a5 5 0 0 1 5 5c0 .65-.13 1.26-.36 1.83l2.92 2.92A11.82 11.82 0 0 0 23 12c-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46A11.8 11.8 0 0 0 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65a3 3 0 0 0 3 3c.22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53a5 5 0 0 1-5-5c0-.79.2-1.53.53-2.2zm4.31-.78 3.15 3.15.02-.16a3 3 0 0 0-3-3l-.17.01z',
+  pin_on: 'M16 9V4h1a1 1 0 0 0 0-2H7a1 1 0 0 0 0 2h1v5a3 3 0 0 1-3 3v2h5.97v7l1 1 1-1v-7H19v-2a3 3 0 0 1-3-3z',
+  pin_off: 'M14 4v5c0 1.12.37 2.16 1 3H9c.65-.86 1-1.9 1-3V4h4m3-2H7a1 1 0 0 0 0 2h1v5a3 3 0 0 1-3 3v2h5.97v7l1 1 1-1v-7H19v-2a3 3 0 0 1-3-3V4h1a1 1 0 0 0 0-2z',
   show: 'M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z'
 };
 
@@ -278,8 +284,8 @@ function imgError(img) {  // logo gone? try the generic picture, then a letter
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : '';
-const icon = (name, label, action, id) =>
-  `<button class="icon" title="${label}" aria-label="${label}" data-action="${action}" data-id="${esc(id)}"><svg viewBox="0 0 24 24"><path d="${ICONS[name]}"/></svg></button>`;
+const icon = (name, label, action, id, cls = '') =>
+  `<button class="icon ${cls}" title="${label}" aria-label="${label}" data-action="${action}" data-id="${esc(id)}"><svg viewBox="0 0 24 24"><path d="${ICONS[name]}"/></svg></button>`;
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -355,6 +361,9 @@ function row(e) {
   if (e.source === 'project' && e.status === 'Update available' && e.latest) acts.push(icon('done', 'Mark as updated', 'mark', e.id));
   if (e.url) acts.push(icon('check', 'Check now', 'check', e.id));
   acts.push(icon('edit', e.source === 'mqtt' ? 'Edit picture, link and notes' : 'Edit', 'edit', e.id));
+  if (e.current && !e.ignored) acts.push(e.pinned
+    ? icon('pin_on', `Pinned at ${esc(e.current)}. Click to unpin`, 'unpin', e.id, 'on')
+    : icon('pin_off', 'Pin at this version (stop offering updates in Home Assistant)', 'pin', e.id));
   acts.push(e.ignored ? icon('show', 'Track again', 'unignore', e.id)
                       : icon('hide', 'Ignore (hide here and in Home Assistant)', 'ignore', e.id));
   acts.push(icon('del', e.source === 'mqtt' ? 'Remove (returns if the machine reports again)' : 'Delete', 'delete', e.id));
@@ -378,11 +387,13 @@ function render() {
   if (state.filter === 'ignored' && !ignored) state.filter = 'all';
   $('#ignored-note').hidden = state.filter !== 'ignored';
   const upd = all.filter(e => e.status === 'Update available').length;
+  const pinned = all.filter(e => e.status === 'Pinned').length;
   const stale = all.filter(e => e.status === 'Not reporting').length;
   const errs = all.filter(e => e.status === 'Error').length;
   const parts = [`${all.length} tracked`, `${upd} update${upd === 1 ? '' : 's'} available`];
   if (stale) parts.push(`${stale} not reporting`);
   if (errs) parts.push(`${errs} with errors`);
+  if (pinned) parts.push(`${pinned} pinned`);
   if (ignored) parts.push(`${ignored} ignored`);
   $('#summary').textContent = parts.join(' · ');
 
@@ -476,6 +487,11 @@ $('#rows').addEventListener('click', async ev => {
       const ignored = b.dataset.action === 'ignore';
       await api(path + '/ignore', { method: 'POST', body: JSON.stringify({ ignored }) });
       toast(ignored ? `Ignoring ${e.name} — find it under Ignored` : `Tracking ${e.name} again`); return load();
+    }
+    if (b.dataset.action === 'pin' || b.dataset.action === 'unpin') {
+      const pinned = b.dataset.action === 'pin';
+      await api(path + '/pin', { method: 'POST', body: JSON.stringify({ pinned }) });
+      toast(pinned ? `${e.name} pinned at ${e.current}` : `${e.name} unpinned`); return load();
     }
     if (b.dataset.action === 'mark') { await api(path + '/mark-updated', { method: 'POST' }); toast(e.name + ' marked as updated'); return load(); }
     if (b.dataset.action === 'delete') {

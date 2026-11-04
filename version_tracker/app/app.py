@@ -1,0 +1,875 @@
+#!/usr/bin/env python3
+"""
+Version Tracker — a Home Assistant add-on.
+
+Keeps one list of things that may need updating and shows each of them as an
+MQTT `update` entity, so they appear under Settings -> Updates:
+
+  * Projects you add in the web page (GitHub, GitLab or self-hosted GitLab
+    releases, or a version you type in by hand).
+  * Machines that report themselves over MQTT with the vt-agent script
+    (apt / Proxmox packages, plus optional apps and Docker containers).
+
+Nothing is ever installed: the entities have no install command, they are
+reminders only.
+"""
+
+import json
+import logging
+import os
+import queue
+import re
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import paho.mqtt.client as mqtt
+
+VERSION = "1.0.0"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("VT_DATA_DIR", "/data")
+OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")
+STORE_FILE = os.path.join(DATA_DIR, "entries.json")
+STATIC_DIR = os.path.join(APP_DIR, "static")
+AGENT_FILE = os.path.join(APP_DIR, "vt-agent.sh")
+AGENT_CONF_FILE = os.path.join(APP_DIR, "version-tracker.conf.example")
+HTTP_PORT = int(os.environ.get("VT_HTTP_PORT", "8099"))
+BASE = "version_tracker"
+USER_AGENT = "version-tracker-ha-addon/" + VERSION
+PROXMOX_ICON = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/proxmox.webp"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("version_tracker")
+
+DEFAULT_OPTIONS = {
+    "check_interval_hours": 6,
+    "stale_hours": 24,
+    "github_token": "",
+    "gitlab_tokens": [],
+    "discovery_prefix": "homeassistant",
+}
+
+
+def load_options():
+    opts = dict(DEFAULT_OPTIONS)
+    try:
+        with open(OPTIONS_FILE) as f:
+            opts.update(json.load(f))
+    except FileNotFoundError:
+        log.warning("No %s found, using defaults", OPTIONS_FILE)
+    return opts
+
+
+def now_ts():
+    return time.time()
+
+
+def iso(ts):
+    if not ts:
+        return ""
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+
+
+def slug(text):
+    s = re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
+    return s or "item"
+
+
+# --------------------------------------------------------------------------
+# Versions
+# --------------------------------------------------------------------------
+
+PRERELEASE_RE = re.compile(r"(alpha|beta|rc\d*|pre|preview|dev|nightly|snapshot)", re.I)
+
+
+def clean_tag(tag):
+    return re.sub(r"^v(?=\d)", "", str(tag or "").strip(), flags=re.I)
+
+
+def is_prerelease(tag):
+    return bool(PRERELEASE_RE.search(str(tag or "")))
+
+
+def parse_nums(v):
+    m = re.search(r"\d+(?:\.\d+)*", str(v or ""))
+    return [int(x) for x in m.group(0).split(".")] if m else None
+
+
+def compare_versions(a, b):
+    """-1, 0, 1, or None if either side has no numeric version."""
+    x, y = parse_nums(a), parse_nums(b)
+    if x is None or y is None:
+        return None
+    for i in range(max(len(x), len(y))):
+        d = (x[i] if i < len(x) else 0) - (y[i] if i < len(y) else 0)
+        if d:
+            return -1 if d < 0 else 1
+    return 0
+
+
+def status_for(current, latest):
+    if not current:
+        return "No current version"
+    if clean_tag(current) == clean_tag(latest):
+        return "Up to date"
+    c = compare_versions(current, latest)
+    if c is None:
+        return "Check manually"
+    return "Update available" if c < 0 else "Up to date"
+
+
+def highest_tag(names):
+    tags = [t for t in names if parse_nums(t) and not is_prerelease(t)]
+    if not tags:
+        raise LookupError("no releases or version tags")
+    best = tags[0]
+    for t in tags[1:]:
+        if compare_versions(t, best) == 1:
+            best = t
+    return best
+
+
+# --------------------------------------------------------------------------
+# GitHub / GitLab lookups
+# --------------------------------------------------------------------------
+
+def parse_project(link):
+    """Turn a link into {provider, scheme, host, path, web, key}."""
+    s = str(link or "").strip()
+    s = re.sub(r"[?#].*$", "", s).rstrip("/")
+    s = re.sub(r"\.git$", "", s, flags=re.I).rstrip("/")
+    m = re.match(r"^git@([^:/\s]+):(.+)$", s)  # ssh form, seen in some image labels
+    if m:
+        s = "https://%s/%s" % (m.group(1), m.group(2))
+    m = re.match(r"^gitlab:(.+)$", s, re.I)
+    if m:
+        s = "https://gitlab.com/" + m.group(1).lstrip("/")
+    elif re.match(r"^[\w-]+/[\w.-]+$", s):
+        s = "https://github.com/" + s
+    if not re.match(r"^https?://", s, re.I):
+        s = "https://" + s
+    m = re.match(r"^(https?)://([^/\s]+)/(.+)$", s, re.I)
+    if not m:
+        raise ValueError("not a project link")
+    scheme, host, path = m.group(1).lower(), m.group(2).lower(), m.group(3)
+
+    if host in ("github.com", "www.github.com"):
+        parts = path.split("/")
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            raise ValueError("not a GitHub repo link")
+        path = parts[0] + "/" + parts[1]
+        return {"provider": "github", "scheme": "https", "host": "github.com", "path": path,
+                "web": "https://github.com/" + path, "key": "github.com/" + path.lower()}
+
+    path = path.split("/-/")[0]
+    path = re.sub(r"/(releases|tags|tree|blob|commits|issues|merge_requests|wikis)(/.*)?$", "", path, flags=re.I)
+    path = path.rstrip("/")
+    if len(path.split("/")) < 2:
+        raise ValueError("not a GitLab project link")
+    return {"provider": "gitlab", "scheme": scheme, "host": host, "path": path,
+            "web": "%s://%s/%s" % (scheme, host, path), "key": host + "/" + path.lower()}
+
+
+def http_get(url, headers):
+    req = urllib.request.Request(url, headers=dict(headers, **{"User-Agent": USER_AGENT}))
+    host = urllib.parse.urlsplit(url).hostname
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, r.read().decode("utf-8", "replace"), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace"), e.headers
+    except (urllib.error.URLError, OSError) as e:
+        raise LookupError("can't reach %s (%s)" % (host, getattr(e, "reason", e)))
+
+
+def latest_github(p, opts):
+    base = "https://api.github.com/repos/" + p["path"]
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    if opts.get("github_token"):
+        headers["Authorization"] = "Bearer " + opts["github_token"]
+
+    def fail(code, hdrs):
+        if code in (403, 429) and str(hdrs.get("X-RateLimit-Remaining", "")) == "0":
+            raise LookupError("GitHub rate limit hit (add a GitHub token in the add-on settings)")
+        raise LookupError("GitHub HTTP %s" % code)
+
+    code, body, hdrs = http_get(base + "/releases/latest", headers)
+    if code == 200:
+        r = json.loads(body)
+        return {"version": clean_tag(r.get("tag_name")), "released": r.get("published_at") or "",
+                "notes_url": r.get("html_url") or p["web"] + "/releases"}
+    if code != 404:
+        fail(code, hdrs)
+
+    code, body, hdrs = http_get(base + "/tags?per_page=100", headers)
+    if code == 404:
+        raise LookupError("repo not found on GitHub")
+    if code != 200:
+        fail(code, hdrs)
+    tag = highest_tag([t.get("name", "") for t in json.loads(body)])
+    return {"version": clean_tag(tag), "released": "",
+            "notes_url": p["web"] + "/releases/tag/" + urllib.parse.quote(tag, safe="")}
+
+
+def gitlab_token(opts, host):
+    for t in opts.get("gitlab_tokens") or []:
+        h = re.sub(r"^https?://", "", str(t.get("host", "")).strip().lower()).split("/")[0]
+        if h == host and t.get("token"):
+            return t["token"]
+    return ""
+
+
+def latest_gitlab(p, opts):
+    api = "%s://%s/api/v4/projects/%s" % (p["scheme"], p["host"], urllib.parse.quote(p["path"], safe=""))
+    headers = {}
+    token = gitlab_token(opts, p["host"])  # only ever sent to the host it was saved for
+    if token:
+        headers["PRIVATE-TOKEN"] = token
+
+    def fail(code):
+        if code == 404:
+            raise LookupError("project not found on %s (private? add a GitLab token)" % p["host"])
+        if code in (401, 403):
+            raise LookupError("access denied by %s (check the GitLab token)" % p["host"])
+        if code == 429:
+            raise LookupError("GitLab rate limit hit (add a token or try later)")
+        raise LookupError("GitLab HTTP %s from %s" % (code, p["host"]))
+
+    def as_list(body):
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
+        if not isinstance(data, list):
+            raise LookupError("%s did not answer like a GitLab server" % p["host"])
+        return data
+
+    code, body, _ = http_get(api + "/releases?per_page=50", headers)
+    if code != 200:
+        fail(code)
+    releases = [r for r in as_list(body) if not r.get("upcoming_release") and not is_prerelease(r.get("tag_name"))]
+    if releases:
+        r = releases[0]
+        links = r.get("_links") or {}
+        return {"version": clean_tag(r.get("tag_name")), "released": r.get("released_at") or "",
+                "notes_url": links.get("self") or p["web"] + "/-/releases/" + urllib.parse.quote(r["tag_name"], safe="")}
+
+    code, body, _ = http_get(api + "/repository/tags?per_page=100&order_by=version", headers)
+    if code == 400:  # GitLab before 15.4 can't sort tags by version
+        code, body, _ = http_get(api + "/repository/tags?per_page=100", headers)
+    if code != 200:
+        fail(code)
+    tag = highest_tag([t.get("name", "") for t in as_list(body)])
+    return {"version": clean_tag(tag), "released": "",
+            "notes_url": p["web"] + "/-/tags/" + urllib.parse.quote(tag, safe="")}
+
+
+def lookup_latest(link, opts):
+    p = parse_project(link)
+    return latest_github(p, opts) if p["provider"] == "github" else latest_gitlab(p, opts)
+
+
+# --------------------------------------------------------------------------
+# Entries
+# --------------------------------------------------------------------------
+#
+# Every entry has: id, source ("project" or "mqtt"), name, current, url,
+# latest_manual (typed by hand, or sent by an agent), found_* (from a
+# GitHub/GitLab lookup), picture. MQTT entries also carry machine, kind,
+# topic, pending, security, packages and last_seen.
+
+KIND_LABELS = {"proxmox": "Proxmox", "debian": "Debian", "ubuntu": "Ubuntu", "docker": "Docker", "app": "App"}
+
+
+def effective_latest(e):
+    return e.get("latest_manual") or e.get("found_version") or ""
+
+
+def source_label(e):
+    if e.get("source") == "mqtt":
+        return KIND_LABELS.get(e.get("kind") or "", "Machine")
+    if e.get("url"):
+        try:
+            return "GitHub" if parse_project(e["url"])["provider"] == "github" else "GitLab"
+        except ValueError:
+            return "Link"
+    return "Manual"
+
+
+def evaluate(e, opts):
+    """Work out status and what Home Assistant should show for an entry."""
+    current = e.get("current") or ""
+    latest = effective_latest(e)
+    pending = int(e.get("pending") or 0)
+    stale = (e.get("source") == "mqtt" and
+             now_ts() - (e.get("last_seen") or 0) > float(opts["stale_hours"]) * 3600)
+
+    if stale:
+        status = "Not reporting"
+    elif e.get("url") and not latest and not e.get("latest_manual"):
+        status = "Error" if e.get("error") else "Checking"
+    elif latest:
+        status = status_for(current, latest)
+    else:
+        status = "Up to date"
+    if not stale and pending > 0:
+        status = "Update available"
+
+    # The version string Home Assistant compares against the installed one.
+    if status == "Not reporting":
+        ha_latest = (current or "?") + " (not reporting)"
+    elif status == "Update available":
+        newer = latest and compare_versions(current, latest) != 0 and clean_tag(latest) != clean_tag(current)
+        ha_latest = latest if newer else current
+        if pending:
+            ha_latest += " (+%d package%s)" % (pending, "" if pending == 1 else "s")
+    elif status == "Check manually":
+        ha_latest = latest
+    else:
+        ha_latest = current
+
+    return {"status": status, "latest": latest, "ha_latest": ha_latest, "stale": stale,
+            "source_label": source_label(e)}
+
+
+def build_summary(e, ev, opts):
+    machine = e.get("machine") or e.get("name")
+    if ev["stale"]:
+        seen = datetime.fromtimestamp(e.get("last_seen") or 0, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return "No report from %s since %s. Check that it is on and its vt-agent cron job is running." % (machine, seen)
+    if e.get("summary"):
+        return e["summary"]
+    pending = int(e.get("pending") or 0)
+    if pending:
+        sec = int(e.get("security") or 0)
+        head = "%d package%s waiting on %s" % (pending, "" if pending == 1 else "s", machine)
+        if sec:
+            head += " (%d security)" % sec
+        pkgs = e.get("packages") or []
+        return head + (": " + ", ".join(pkgs) if pkgs else ".")
+    if e.get("error"):
+        return "Last check failed: " + e["error"]
+    if ev["status"] == "Update available" and ev["latest"]:
+        when = (e.get("found_released") or "")[:10]
+        return "%s %s is available%s." % (e.get("name"), ev["latest"], " (released %s)" % when if when else "")
+    return ""
+
+
+def truncate(s, n=255):
+    s = s or ""
+    return s if len(s) <= n else s[: n - 1] + "\u2026"
+
+
+class Store:
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.RLock()
+        self.entries = {}
+        try:
+            with open(path) as f:
+                for e in json.load(f):
+                    self.entries[e["id"]] = e
+        except FileNotFoundError:
+            pass
+        except (ValueError, KeyError) as err:
+            log.error("Could not read %s (%s); starting empty", path, err)
+
+    def save(self):
+        with self.lock:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(list(self.entries.values()), f, indent=1)
+            os.replace(tmp, self.path)
+
+    def get(self, eid):
+        with self.lock:
+            e = self.entries.get(eid)
+            return dict(e) if e else None
+
+    def all(self):
+        with self.lock:
+            return [dict(e) for e in self.entries.values()]
+
+    def put(self, e):
+        with self.lock:
+            self.entries[e["id"]] = e
+            self.save()
+
+    def update(self, eid, **fields):
+        with self.lock:
+            if eid not in self.entries:
+                return None
+            self.entries[eid].update(fields)
+            self.save()
+            return dict(self.entries[eid])
+
+    def delete(self, eid):
+        with self.lock:
+            e = self.entries.pop(eid, None)
+            self.save()
+            return e
+
+
+# --------------------------------------------------------------------------
+# The tracker: MQTT, lookups, scheduling
+# --------------------------------------------------------------------------
+
+class Tracker:
+    def __init__(self, opts):
+        self.opts = opts
+        self.store = Store(STORE_FILE)
+        self.prefix = (opts.get("discovery_prefix") or "homeassistant").strip("/")
+        self.published = {}          # entry id -> last published payloads
+        self.cache = {}              # project key -> (time, result or error)
+        self.cache_lock = threading.Lock()
+        self.jobs = queue.Queue()
+        self.queued = set()
+        self.last_full_check = 0
+        self.connected = False
+        self.broker = ""
+        self.client = None
+
+    # ---- MQTT ----
+
+    def mqtt_settings(self):
+        o = self.opts
+        if o.get("mqtt_host"):
+            return {"host": o["mqtt_host"], "port": int(o.get("mqtt_port") or 1883),
+                    "username": o.get("mqtt_username") or "", "password": o.get("mqtt_password") or "",
+                    "ssl": False}
+        host = os.environ.get("MQTT_HOST", "")
+        return {"host": host, "port": int(os.environ.get("MQTT_PORT") or 1883),
+                "username": os.environ.get("MQTT_USERNAME", ""), "password": os.environ.get("MQTT_PASSWORD", ""),
+                "ssl": os.environ.get("MQTT_SSL", "false").lower() == "true"}
+
+    def start_mqtt(self):
+        s = self.mqtt_settings()
+        if not s["host"]:
+            log.error("No MQTT broker found. Install the Mosquitto broker add-on, or set mqtt_host in the add-on settings.")
+            return
+        self.broker = "%s:%s" % (s["host"], s["port"])
+        client_id = "version-tracker-" + uuid.uuid4().hex[:6]
+        if hasattr(mqtt, "CallbackAPIVersion"):  # paho-mqtt 2.x
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+        else:                                    # paho-mqtt 1.x
+            c = mqtt.Client(client_id=client_id)
+        if s["username"]:
+            c.username_pw_set(s["username"], s["password"])
+        if s["ssl"]:
+            c.tls_set()
+        c.will_set(BASE + "/status", "offline", retain=True)
+        c.on_connect = self.on_connect
+        c.on_disconnect = self.on_disconnect
+        c.on_message = self.on_message
+        c.reconnect_delay_set(2, 60)
+        self.client = c
+        c.connect_async(s["host"], s["port"], keepalive=60)
+        c.loop_start()
+
+    def on_connect(self, client, userdata, flags, reason_code, properties=None):
+        failed = reason_code.is_failure if hasattr(reason_code, "is_failure") else reason_code != 0
+        if failed:
+            log.error("MQTT connection refused: %s (check the broker username and password)", reason_code)
+            return
+        log.info("Connected to MQTT broker %s", self.broker)
+        self.connected = True
+        client.publish(BASE + "/status", "online", retain=True)
+        client.subscribe([(BASE + "/report/#", 1), (self.prefix + "/status", 1)])
+        self.published.clear()
+        self.publish_all()
+
+    def on_disconnect(self, client, userdata, *args):  # signature differs between paho 1.x and 2.x
+        self.connected = False
+        log.warning("Disconnected from MQTT broker, retrying")
+
+    def on_message(self, client, userdata, msg):
+        try:
+            if msg.topic == self.prefix + "/status":
+                if msg.payload.decode(errors="replace") == "online":
+                    log.info("Home Assistant restarted, re-sending entities")
+                    self.published.clear()
+                    self.publish_all()
+                return
+            suffix = msg.topic[len(BASE + "/report/"):]
+            if suffix:
+                self.on_report(suffix, msg.payload.decode("utf-8", "replace"))
+        except Exception:
+            log.exception("Error handling message on %s", msg.topic)
+
+    def pub(self, topic, payload, retain=True):
+        if self.client and self.connected:
+            self.client.publish(topic, payload, qos=1, retain=retain)
+
+    # ---- Home Assistant entities ----
+
+    def topics(self, eid):
+        return {"config": "%s/update/%s_%s/config" % (self.prefix, BASE, eid),
+                "state": "%s/entity/%s/state" % (BASE, eid),
+                "attrs": "%s/entity/%s/attributes" % (BASE, eid)}
+
+    def discovery(self, e, t):
+        if e.get("source") == "mqtt":
+            machine = e.get("machine") or e.get("name")
+            device = {"identifiers": ["%s_machine_%s" % (BASE, slug(machine))], "name": machine,
+                      "manufacturer": "Version Tracker", "model": "Self-reporting machine"}
+            name = None if e.get("topic", "").endswith("/system") else e.get("name")
+        else:
+            device = {"identifiers": ["%s_%s" % (BASE, e["id"])], "name": e["name"],
+                      "manufacturer": "Version Tracker", "model": source_label(e) + " release"
+                      if e.get("url") else "Manual entry"}
+            if e.get("url"):
+                try:
+                    device["configuration_url"] = parse_project(e["url"])["web"]
+                except ValueError:
+                    pass
+            name = None
+        cfg = {"name": name, "unique_id": "%s_%s" % (BASE, e["id"]),
+               "state_topic": t["state"], "json_attributes_topic": t["attrs"],
+               "availability_topic": BASE + "/status", "device": device,
+               "origin": {"name": "Version Tracker", "sw_version": VERSION}}
+        picture = e.get("picture") or (PROXMOX_ICON if e.get("kind") == "proxmox" else "")
+        if picture.startswith(("http://", "https://")):
+            cfg["entity_picture"] = picture
+        return cfg
+
+    def publish_entry(self, e):
+        t = self.topics(e["id"])
+        ev = evaluate(e, self.opts)
+        state = {"installed_version": e.get("current") or "unknown", "latest_version": ev["ha_latest"] or e.get("current") or "unknown",
+                 "title": e.get("title") or e.get("name"), "release_summary": truncate(build_summary(e, ev, self.opts))}
+        url = e.get("found_notes_url") or e.get("release_url") or e.get("url")
+        if url and url.startswith(("http://", "https://")):
+            state["release_url"] = url
+        attrs = {"status": ev["status"], "source": ev["source_label"], "project_url": e.get("url") or None,
+                 "machine": e.get("machine") or None, "last_checked": iso(e.get("checked")) or None,
+                 "last_seen": iso(e.get("last_seen")) or None}
+        if e.get("source") == "mqtt":
+            attrs.update(pending_packages=int(e.get("pending") or 0), security_updates=int(e.get("security") or 0))
+        payloads = (json.dumps(self.discovery(e, t)), json.dumps(state), json.dumps(attrs))
+        if self.published.get(e["id"]) == payloads or not self.connected:
+            return
+        self.pub(t["config"], payloads[0])
+        self.pub(t["attrs"], payloads[2])
+        self.pub(t["state"], payloads[1])
+        self.published[e["id"]] = payloads
+
+    def unpublish(self, eid):
+        for topic in self.topics(eid).values():
+            self.pub(topic, "")
+        self.published.pop(eid, None)
+
+    def publish_all(self):
+        for e in self.store.all():
+            self.publish_entry(e)
+
+    # ---- Reports from machines ----
+
+    def on_report(self, suffix, payload):
+        eid = "m_" + slug(suffix)
+        if not payload.strip():  # the agent cleared this item (e.g. a removed container)
+            if self.store.delete(eid):
+                log.info("Removed %s (cleared by its agent)", suffix)
+                self.unpublish(eid)
+            return
+        try:
+            data = json.loads(payload)
+            assert isinstance(data, dict)
+        except (ValueError, AssertionError):
+            log.warning("Ignoring report on %s: not a JSON object", suffix)
+            return
+        installed = str(data.get("installed_version") or "").strip()
+        if not installed:
+            log.warning("Ignoring report on %s: no installed_version", suffix)
+            return
+
+        def num(v):
+            try:
+                return max(0, int(v))
+            except (TypeError, ValueError):
+                return 0
+
+        machine = str(data.get("machine") or suffix.split("/")[0])
+        e = self.store.get(eid) or {"id": eid, "source": "mqtt", "created": now_ts()}
+        url = str(data.get("project_url") or "").strip()
+        if url:
+            try:
+                parse_project(url)
+            except ValueError:
+                url = ""
+        e.update(topic=suffix, machine=machine, name=str(data.get("name") or machine),
+                 title=str(data.get("title") or "") or None, kind=str(data.get("kind") or ""),
+                 current=installed, latest_manual=str(data.get("latest_version") or "").strip(),
+                 url=url, pending=num(data.get("pending")), security=num(data.get("security")),
+                 packages=[str(p) for p in (data.get("packages") or [])][:50],
+                 picture=str(data.get("picture") or ""), release_url=str(data.get("release_url") or ""),
+                 summary=str(data.get("summary") or ""), last_seen=now_ts())
+        if not url:
+            e.update(found_version="", found_released="", found_notes_url="", error="")
+        self.store.put(e)
+        self.publish_entry(e)
+        if url and not e.get("latest_manual"):
+            self.enqueue(eid)
+
+    # ---- Lookups ----
+
+    def enqueue(self, eid, force=False):
+        if eid in self.queued:
+            return
+        self.queued.add(eid)
+        self.jobs.put((eid, force))
+
+    def worker(self):
+        while True:
+            eid, force = self.jobs.get()
+            self.queued.discard(eid)
+            try:
+                self.check_entry(eid, force)
+            except Exception:
+                log.exception("Check failed for %s", eid)
+
+    def check_entry(self, eid, force=False):
+        e = self.store.get(eid)
+        if not e or not e.get("url"):
+            return
+        try:
+            key = parse_project(e["url"])["key"]
+        except ValueError as err:
+            self.store.update(eid, error=str(err), checked=now_ts())
+            self.publish_entry(self.store.get(eid))
+            return
+        ttl = max(1.0, float(self.opts["check_interval_hours"])) * 3600 - 120
+        with self.cache_lock:
+            hit = self.cache.get(key)
+        if force or not hit or now_ts() - hit[0] > ttl:
+            try:
+                result = lookup_latest(e["url"], self.opts)
+            except (LookupError, ValueError) as err:
+                result = {"error": str(err)}
+            except Exception as err:  # malformed JSON etc.
+                result = {"error": "unexpected answer (%s)" % err.__class__.__name__}
+            hit = (now_ts(), result)
+            with self.cache_lock:
+                self.cache[key] = hit
+        result = hit[1]
+        if "error" in result:
+            fields = {"error": result["error"]}
+        else:
+            fields = {"error": "", "found_version": result["version"], "found_released": result["released"],
+                      "found_notes_url": result["notes_url"]}
+        fields["checked"] = hit[0]
+        e = self.store.update(eid, **fields)
+        if e:
+            self.publish_entry(e)
+
+    def check_all(self, force=False):
+        self.last_full_check = now_ts()
+        for e in self.store.all():
+            if e.get("url") and not e.get("latest_manual"):
+                self.enqueue(e["id"], force)
+
+    def scheduler(self):
+        while True:
+            interval = max(1.0, float(self.opts["check_interval_hours"])) * 3600
+            if now_ts() - self.last_full_check >= interval:
+                self.check_all()
+            self.publish_all()  # picks up machines that stopped reporting
+            time.sleep(60)
+
+    # ---- Changes from the web page ----
+
+    def add_or_edit(self, data, eid=None):
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise ValueError("Name is required")
+        url = str(data.get("url") or "").strip()
+        if url:
+            parse_project(url)  # raises ValueError with a readable message
+        latest = "" if url else str(data.get("latest") or "").strip()
+        if not url and not latest:
+            raise ValueError("Add a project link, or type the latest version by hand")
+        picture = str(data.get("picture") or "").strip()
+        if picture and not picture.startswith(("http://", "https://")):
+            raise ValueError("Picture must be an http(s) link")
+        fields = {"name": name, "current": str(data.get("current") or "").strip(), "url": url,
+                  "latest_manual": latest, "picture": picture}
+        if eid:
+            old = self.store.get(eid)
+            if not old or old.get("source") != "project":
+                raise KeyError(eid)
+            if old.get("url") != url:
+                fields.update(found_version="", found_released="", found_notes_url="", error="", checked=0)
+            e = self.store.update(eid, **fields)
+        else:
+            e = dict(fields, id="p_" + uuid.uuid4().hex[:8], source="project", created=now_ts())
+            self.store.put(e)
+        self.publish_entry(e)
+        if url:
+            self.enqueue(e["id"])
+        return e
+
+    def mark_updated(self, eid):
+        e = self.store.get(eid)
+        if not e or e.get("source") != "project":
+            raise KeyError(eid)
+        latest = effective_latest(e)
+        if not latest:
+            raise ValueError("No latest version known yet")
+        e = self.store.update(eid, current=latest)
+        self.publish_entry(e)
+        return e
+
+    def remove(self, eid):
+        e = self.store.delete(eid)
+        if not e:
+            raise KeyError(eid)
+        self.unpublish(eid)
+        if e.get("source") == "mqtt" and e.get("topic"):
+            self.pub(BASE + "/report/" + e["topic"], "")  # clear the retained report too
+        return e
+
+    def view(self, e):
+        ev = evaluate(e, self.opts)
+        return {"id": e["id"], "source": e.get("source"), "source_label": ev["source_label"],
+                "name": e.get("name"), "machine": e.get("machine") or "", "kind": e.get("kind") or "",
+                "current": e.get("current") or "", "latest": ev["latest"], "status": ev["status"],
+                "pending": int(e.get("pending") or 0), "security": int(e.get("security") or 0),
+                "packages": e.get("packages") or [], "url": e.get("url") or "",
+                "project_web": self._web(e.get("url")), "notes_url": e.get("found_notes_url") or e.get("release_url") or "",
+                "released": e.get("found_released") or "", "checked": iso(e.get("checked")),
+                "last_seen": iso(e.get("last_seen")), "error": e.get("error") or "",
+                "picture": e.get("picture") or (PROXMOX_ICON if e.get("kind") == "proxmox" else ""),
+                "latest_manual": e.get("latest_manual") if e.get("source") == "project" else "",
+                "summary": build_summary(e, ev, self.opts)}
+
+    @staticmethod
+    def _web(url):
+        try:
+            return parse_project(url)["web"] if url else ""
+        except ValueError:
+            return ""
+
+    def info(self):
+        return {"version": VERSION, "mqtt_connected": self.connected, "broker": self.broker,
+                "report_topic": BASE + "/report/<machine>/<item>", "stale_hours": self.opts["stale_hours"],
+                "check_interval_hours": self.opts["check_interval_hours"],
+                "github_token": bool(self.opts.get("github_token")),
+                "last_full_check": iso(self.last_full_check)}
+
+
+# --------------------------------------------------------------------------
+# Web page and JSON API (served through Home Assistant ingress)
+# --------------------------------------------------------------------------
+
+def make_handler(tracker):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "VersionTracker/" + VERSION
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def send(self, code, body, ctype="application/json", extra=None):
+            data = body if isinstance(body, bytes) else (json.dumps(body) if ctype == "application/json" else body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype + ("; charset=utf-8" if not ctype.startswith("image") else ""))
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def body(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            if not n:
+                return {}
+            try:
+                data = json.loads(self.rfile.read(n))
+            except ValueError:
+                raise ValueError("Request body is not JSON")
+            if not isinstance(data, dict):
+                raise ValueError("Request body must be a JSON object")
+            return data
+
+        def route(self):
+            return [p for p in urllib.parse.urlsplit(self.path).path.split("/") if p]
+
+        def handle_api(self, method):
+            parts = self.route()
+            try:
+                if parts in ([], ["index.html"]) and method == "GET":
+                    with open(os.path.join(STATIC_DIR, "index.html"), "rb") as f:
+                        return self.send(200, f.read(), "text/html")
+                if parts[:1] != ["api"]:
+                    return self.send(404, {"error": "not found"})
+                p = parts[1:]
+                if p == ["entries"] and method == "GET":
+                    return self.send(200, {"entries": [tracker.view(e) for e in tracker.store.all()],
+                                           "info": tracker.info()})
+                if p == ["entries"] and method == "POST":
+                    return self.send(201, tracker.view(tracker.add_or_edit(self.body())))
+                if len(p) == 2 and p[0] == "entries" and method == "PUT":
+                    return self.send(200, tracker.view(tracker.add_or_edit(self.body(), p[1])))
+                if len(p) == 2 and p[0] == "entries" and method == "DELETE":
+                    tracker.remove(p[1])
+                    return self.send(200, {"ok": True})
+                if len(p) == 3 and p[0] == "entries" and p[2] == "mark-updated" and method == "POST":
+                    return self.send(200, tracker.view(tracker.mark_updated(p[1])))
+                if len(p) == 3 and p[0] == "entries" and p[2] == "check" and method == "POST":
+                    if not tracker.store.get(p[1]):
+                        raise KeyError(p[1])
+                    tracker.enqueue(p[1], force=True)
+                    return self.send(202, {"ok": True})
+                if p == ["check"] and method == "POST":
+                    tracker.check_all(force=True)
+                    return self.send(202, {"ok": True})
+                if p == ["agent"] and method == "GET":
+                    with open(AGENT_FILE, "rb") as f:
+                        return self.send(200, f.read(), "text/x-shellscript",
+                                         {"Content-Disposition": 'attachment; filename="vt-agent"'})
+                if p == ["agent-conf"] and method == "GET":
+                    with open(AGENT_CONF_FILE, "rb") as f:
+                        return self.send(200, f.read(), "text/plain",
+                                         {"Content-Disposition": 'attachment; filename="version-tracker.conf"'})
+                return self.send(404, {"error": "not found"})
+            except KeyError:
+                return self.send(404, {"error": "That entry no longer exists"})
+            except ValueError as err:
+                return self.send(400, {"error": str(err)})
+            except Exception:
+                log.exception("API error")
+                return self.send(500, {"error": "Internal error, see the add-on log"})
+
+        def do_GET(self):
+            self.handle_api("GET")
+
+        def do_POST(self):
+            self.handle_api("POST")
+
+        def do_PUT(self):
+            self.handle_api("PUT")
+
+        def do_DELETE(self):
+            self.handle_api("DELETE")
+
+    return Handler
+
+
+def main():
+    opts = load_options()
+    tracker = Tracker(opts)
+    log.info("Version Tracker %s starting with %d entries", VERSION, len(tracker.store.entries))
+    tracker.start_mqtt()
+    threading.Thread(target=tracker.worker, daemon=True).start()
+    threading.Thread(target=tracker.scheduler, daemon=True).start()
+    server = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), make_handler(tracker))
+    log.info("Web page listening on port %d", HTTP_PORT)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

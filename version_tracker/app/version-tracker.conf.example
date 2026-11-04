@@ -1,0 +1,26 @@
+# /etc/version-tracker.conf: settings for vt-agent.
+# It holds your MQTT password, so keep it private:  chmod 600 /etc/version-tracker.conf
+
+# Your MQTT broker. With the Mosquitto broker add-on, this is Home Assistant's IP.
+BROKER="192.168.1.10"
+PORT=1883
+MQTT_USER="mqtt"
+MQTT_PASS="your-mqtt-password"
+
+# The name this machine gets in Home Assistant (default: its hostname).
+#MACHINE="pve1"
+
+# Picture shown in Home Assistant. Proxmox hosts get the Proxmox logo automatically.
+#PICTURE="https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/debian-linux.webp"
+
+# Refresh the package lists when they're older than this many hours (0 = never).
+REFRESH_HOURS=6
+
+# Report running Docker containers: auto (when Docker is installed), or 0 to turn off.
+DOCKER=auto
+
+# Other apps on this machine, as "Name|installed version|GitHub or GitLab link".
+# The add-on looks up the latest release for you.
+#APPS=(
+#  "Jellyfin|$(jellyfin --version 2>/dev/null | awk '{print $NF}')|https://github.com/jellyfin/jellyfin"
+#)

@@ -1,0 +1,5 @@
+# Home Assistant app/add-on repository manifest. Add this repository's URL in
+# Settings → Apps → App store → ⋮ → Repositories to install Version Tracker.
+name: Version Tracker
+url: https://github.com/big-barlowe/version-tracker-addon
+maintainer: big-barlowe

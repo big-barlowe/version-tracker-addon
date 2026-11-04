@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Version Tracker</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1c1f24; --muted: #646b75; --line: #e3e6ea;
+    --accent: #0a84c6; --accent-ink: #ffffff; --hover: #f0f3f6;
+    --upd-bg: #fdecea; --upd: #b3261e; --ok-bg: #e7f5ec; --ok: #1e7a3c;
+    --warn-bg: #fff4dc; --warn: #8a5800; --err-bg: #fdecea; --err: #b3261e;
+    --chip: #eef1f4; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111315; --card: #1b1e21; --text: #e6e8eb; --muted: #9aa1a9; --line: #2c3035;
+      --accent: #3aa8e8; --accent-ink: #0b1620; --hover: #23272b;
+      --upd-bg: #3a1c1a; --upd: #ffb4ab; --ok-bg: #16301f; --ok: #8fd9a8;
+      --warn-bg: #3a2c10; --warn: #f5c56b; --err-bg: #3a1c1a; --err: #ffb4ab;
+      --chip: #262a2e; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 Roboto, "Segoe UI", system-ui, -apple-system, sans-serif; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 16px 48px; }
+  header.top { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 16px; }
+  h1 { font-size: 22px; font-weight: 500; margin: 0 0 2px; }
+  .muted { color: var(--muted); }
+  #summary { margin: 0; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--text); padding: 7px 14px; }
+  button:hover { background: var(--hover); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 500; }
+  button.primary:hover { filter: brightness(1.07); }
+  button:disabled { opacity: .55; cursor: default; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tabs button { border-radius: 999px; padding: 5px 13px; background: transparent; }
+  .tabs button[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .tabs .n { opacity: .7; margin-left: 4px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-weight: 500; font-size: 12px; color: var(--muted); text-transform: uppercase;
+       letter-spacing: .04em; padding: 10px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--hover); }
+  .name { display: flex; gap: 10px; align-items: flex-start; min-width: 160px; }
+  .name img { width: 26px; height: 26px; object-fit: contain; flex: none; margin-top: 1px; }
+  .name .ph { width: 26px; height: 26px; border-radius: 6px; background: var(--chip); flex: none; display: grid;
+              place-items: center; font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 1px; }
+  .name strong { font-weight: 500; display: block; }
+  .name small, td small { color: var(--muted); font-size: 12px; display: block; overflow-wrap: anywhere; }
+  .ver { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 6px; padding: 1px 7px; font-size: 12px; white-space: nowrap; }
+  .pill { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .s-upd { background: var(--upd-bg); color: var(--upd); }
+  .s-ok { background: var(--ok-bg); color: var(--ok); }
+  .s-warn { background: var(--warn-bg); color: var(--warn); }
+  .s-err { background: var(--err-bg); color: var(--err); }
+  .s-muted { background: var(--chip); color: var(--muted); }
+  details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .pkgs { font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 320px; margin-top: 4px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .links a { display: block; white-space: nowrap; }
+  .row-actions { display: flex; gap: 2px; justify-content: flex-end; }
+  .icon { border: 0; background: transparent; padding: 6px; border-radius: 8px; color: var(--muted); line-height: 0; }
+  .icon:hover { background: var(--chip); color: var(--text); }
+  .icon svg { width: 18px; height: 18px; fill: currentColor; }
+  .empty { padding: 40px 16px; text-align: center; color: var(--muted); }
+  .banner { border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--warn-bg); color: var(--warn); }
+
+  dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; background: var(--card); color: var(--text);
+           width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+  dialog.wide { width: min(760px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  .dlg-body { padding: 20px; overflow: auto; }
+  .dlg-body h2 { margin: 0 0 4px; font-size: 18px; font-weight: 500; }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); }
+  label { display: block; margin-top: 14px; font-weight: 500; }
+  label .hint { font-weight: 400; color: var(--muted); font-size: 12px; display: block; }
+  input { width: 100%; font: inherit; padding: 8px 10px; margin-top: 4px; border-radius: 8px; border: 1px solid var(--line);
+          background: var(--bg); color: var(--text); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  input::placeholder { color: var(--muted); opacity: .55; }
+  .form-error { color: var(--err); margin-top: 12px; min-height: 1em; }
+  ol.steps { padding-left: 20px; margin: 12px 0 0; }
+  ol.steps li { margin-bottom: 14px; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 6px 0 0;
+        font: 12px/1.5 var(--mono); overflow: auto; max-height: 260px; white-space: pre; }
+  .codebar { display: flex; gap: 6px; margin-top: 6px; }
+  .codebar button, .codebar a { font-size: 12px; padding: 4px 10px; }
+  .codebar a { border: 1px solid var(--line); border-radius: 8px; color: var(--text); }
+  .status-line { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--ok); } .dot.off { background: var(--err); }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg);
+           padding: 9px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: calc(100vw - 32px); }
+  #toast.show { opacity: 1; }
+
+  @media (max-width: 760px) {
+    thead { display: none; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
+    tr:last-child { border-bottom: 0; }
+    td { border: 0; padding: 4px 14px; display: flex; gap: 12px; }
+    td::before { content: attr(data-label); color: var(--muted); font-size: 12px; min-width: 92px; flex: none; padding-top: 1px; }
+    td.c-name::before, td.c-actions::before { display: none; }
+    td.c-name { padding-top: 6px; }
+    .row-actions { justify-content: flex-start; }
+    .links a { display: inline; margin-right: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Version Tracker</h1>
+      <p id="summary" class="muted">Loading…</p>
+    </div>
+    <div class="actions">
+      <button id="btn-machine">Add a machine</button>
+      <button id="btn-check">Check now</button>
+      <button id="btn-add" class="primary">Add project</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+  <nav class="tabs" id="tabs" aria-label="Filter"></nav>
+
+  <div class="card">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Source</th><th>Current</th><th>Latest</th><th>Status</th>
+        <th>Released</th><th>Links</th><th>Updated</th><th><span hidden>Actions</span></th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty" hidden></div>
+  </div>
+</div>
+
+<dialog id="dlg-entry">
+  <form id="entry-form" method="dialog">
+    <div class="dlg-body">
+      <h2 id="entry-title">Add project</h2>
+      <p class="muted" style="margin:0">It shows up in Home Assistant under Settings → Updates whenever a newer version exists.</p>
+      <label>Name
+        <input name="name" required autocomplete="off" placeholder="Jellyfin">
+      </label>
+      <label>Current version
+        <span class="hint">What you're running now.</span>
+        <input name="current" autocomplete="off" placeholder="10.10.7">
+      </label>
+      <label>Project link
+        <span class="hint">GitHub or GitLab (self-hosted works too). Leave blank to track something by hand.</span>
+        <input name="url" autocomplete="off" placeholder="https://github.com/jellyfin/jellyfin">
+      </label>
+      <label id="latest-wrap">Latest version
+        <span class="hint">Only used without a project link, e.g. for router firmware.</span>
+        <input name="latest" autocomplete="off" placeholder="1.2.3">
+      </label>
+      <label>Picture link <span class="hint">Optional. Shown in Home Assistant, e.g. a dashboard-icons link.</span>
+        <input name="picture" autocomplete="off" placeholder="https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/jellyfin.webp">
+      </label>
+      <div class="form-error" id="entry-error"></div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" data-close>Cancel</button>
+      <button type="submit" class="primary" id="entry-save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-machine" class="wide">
+  <div class="dlg-body">
+    <h2>Add a machine</h2>
+    <p class="muted" style="margin:0">Machines report themselves over MQTT. There's nothing to add here or in configuration.yaml — a machine appears as soon as it reports.</p>
+    <div class="status-line"><span class="dot" id="mqtt-dot"></span><span id="mqtt-text">Checking MQTT…</span></div>
+    <ol class="steps">
+      <li>On the machine, install the MQTT client:
+        <pre>apt install -y mosquitto-clients</pre></li>
+      <li>Save the agent as <code>/usr/local/bin/vt-agent</code>, then run <code>chmod +x /usr/local/bin/vt-agent</code>.
+        <pre id="agent-code">Loading…</pre>
+        <div class="codebar"><button type="button" data-copy="agent-code">Copy</button><a href="api/agent" download="vt-agent">Download</a></div></li>
+      <li>Create <code>/etc/version-tracker.conf</code> with your broker details, then run <code>chmod 600 /etc/version-tracker.conf</code>.
+        <pre id="conf-code">Loading…</pre>
+        <div class="codebar"><button type="button" data-copy="conf-code">Copy</button></div></li>
+      <li>Run <code>vt-agent</code> once. The machine shows up here within a few seconds.</li>
+      <li>Schedule it to run every hour:
+        <pre id="cron-code">echo '17 * * * * root /usr/local/bin/vt-agent &gt;/dev/null 2&gt;&amp;1' &gt; /etc/cron.d/version-tracker</pre>
+        <div class="codebar"><button type="button" data-copy="cron-code">Copy</button></div></li>
+    </ol>
+    <p class="muted" id="stale-note"></p>
+  </div>
+  <div class="dlg-foot"><button type="button" data-close>Close</button></div>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = { entries: [], info: {}, filter: 'all', editing: null };
+const RANK = { 'Update available': 0, 'Not reporting': 1, 'Error': 2, 'Check manually': 3, 'Checking': 4 };
+const PILL = { 'Update available': 's-upd', 'Up to date': 's-ok', 'Not reporting': 's-warn',
+               'Check manually': 's-warn', 'Error': 's-err' };
+const NEEDS_ATTENTION = new Set(['Update available', 'Not reporting', 'Error', 'Check manually']);
+const ICONS = {
+  edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
+  check: 'M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z',
+  done: 'M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z',
+  del: 'M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'
+};
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : '';
+const icon = (name, label, action, id) =>
+  `<button class="icon" title="${label}" aria-label="${label}" data-action="${action}" data-id="${esc(id)}"><svg viewBox="0 0 24 24"><path d="${ICONS[name]}"/></svg></button>`;
+
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+function ago(iso) {
+  if (!iso) return '';
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + ' min ago';
+  if (s < 86400) return Math.round(s / 3600) + ' h ago';
+  return Math.round(s / 86400) + ' d ago';
+}
+const day = iso => iso ? new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+
+function matches(e, f = state.filter) {
+  if (f === 'updates') return NEEDS_ATTENTION.has(e.status);
+  if (f === 'machines') return e.source === 'mqtt';
+  if (f === 'projects') return e.source === 'project';
+  return true;
+}
+
+function renderTabs() {
+  const n = f => state.entries.filter(e => matches(e, f)).length;
+  const tabs = [['all', 'All'], ['updates', 'Needs attention'], ['machines', 'Machines'], ['projects', 'Projects']];
+  $('#tabs').innerHTML = tabs.map(([k, label]) =>
+    `<button data-filter="${k}" aria-pressed="${state.filter === k}">${label}<span class="n">${n(k)}</span></button>`).join('');
+}
+
+function row(e) {
+  const isSystem = e.source === 'mqtt' && e.name === e.machine;
+  const sub = e.source === 'mqtt'
+    ? (isSystem ? (e.kind ? e.source_label + ' host' : 'Machine') : 'on ' + e.machine)
+    : (e.project_web ? e.project_web.replace(/^https?:\/\//, '') : 'Tracked by hand');
+  const pic = safeUrl(e.picture)
+    ? `<img src="${esc(e.picture)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'ph',textContent:'${esc((e.name || '?')[0].toUpperCase())}'}))">`
+    : `<span class="ph">${esc((e.name || '?')[0].toUpperCase())}</span>`;
+
+  let latest = e.latest && e.latest !== e.current ? `<span class="ver">${esc(e.latest)}</span>` : (e.latest ? `<span class="ver muted">${esc(e.latest)}</span>` : '<span class="muted">—</span>');
+  if (e.pending) {
+    latest += `<details><summary>+${e.pending} package${e.pending === 1 ? '' : 's'}${e.security ? `, ${e.security} security` : ''}</summary>
+      <div class="pkgs">${esc(e.packages.join(', '))}${e.packages.length < e.pending ? ', …' : ''}</div></details>`;
+  }
+  const pill = `<span class="pill ${PILL[e.status] || 's-muted'}">${esc(e.status)}</span>` +
+    (e.error ? `<small title="${esc(e.error)}">${esc(e.error)}</small>` : '');
+  const links = [
+    safeUrl(e.notes_url) && `<a href="${esc(e.notes_url)}" target="_blank" rel="noopener">Release notes ↗</a>`,
+    safeUrl(e.project_web) && `<a href="${esc(e.project_web)}" target="_blank" rel="noopener">Project ↗</a>`
+  ].filter(Boolean).join('') || '<span class="muted">—</span>';
+  const updated = e.source === 'mqtt'
+    ? `seen ${ago(e.last_seen)}${e.checked ? `<small>checked ${ago(e.checked)}</small>` : ''}`
+    : (e.checked ? `checked ${ago(e.checked)}` : (e.url ? 'not checked yet' : '<span class="muted">—</span>'));
+
+  const acts = [];
+  if (e.source === 'project' && e.status === 'Update available' && e.latest) acts.push(icon('done', 'Mark as updated', 'mark', e.id));
+  if (e.url) acts.push(icon('check', 'Check now', 'check', e.id));
+  if (e.source === 'project') acts.push(icon('edit', 'Edit', 'edit', e.id));
+  acts.push(icon('del', e.source === 'mqtt' ? 'Remove (returns if the machine reports again)' : 'Delete', 'delete', e.id));
+
+  return `<tr>
+    <td class="c-name"><div class="name">${pic}<div><strong>${esc(e.name)}</strong><small>${esc(sub)}</small></div></div></td>
+    <td data-label="Source"><span class="chip">${esc(e.source_label)}</span></td>
+    <td data-label="Current"><span class="ver">${esc(e.current) || '<span class="muted">—</span>'}</span></td>
+    <td data-label="Latest"><div>${latest}</div></td>
+    <td data-label="Status"><div>${pill}</div></td>
+    <td data-label="Released">${esc(day(e.released)) || '<span class="muted">—</span>'}</td>
+    <td data-label="Links" class="links"><div>${links}</div></td>
+    <td data-label="Updated"><div>${updated}</div></td>
+    <td class="c-actions"><div class="row-actions">${acts.join('')}</div></td>
+  </tr>`;
+}
+
+function render() {
+  const all = state.entries;
+  const upd = all.filter(e => e.status === 'Update available').length;
+  const stale = all.filter(e => e.status === 'Not reporting').length;
+  const errs = all.filter(e => e.status === 'Error').length;
+  const parts = [`${all.length} tracked`, `${upd} update${upd === 1 ? '' : 's'} available`];
+  if (stale) parts.push(`${stale} not reporting`);
+  if (errs) parts.push(`${errs} with errors`);
+  $('#summary').textContent = parts.join(' · ');
+
+  const banner = $('#banner');
+  if (state.info && state.info.mqtt_connected === false) {
+    banner.hidden = false;
+    banner.textContent = 'Not connected to MQTT, so nothing reaches Home Assistant yet. Check the add-on log, and that the Mosquitto broker is running.';
+  } else banner.hidden = true;
+
+  renderTabs();
+  const list = all.filter(e => matches(e)).sort((a, b) =>
+    (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9) ||
+    (a.machine || '~').localeCompare(b.machine || '~') ||
+    (a.name || '').localeCompare(b.name || ''));
+  $('#rows').innerHTML = list.map(row).join('');
+  const empty = $('#empty');
+  empty.hidden = list.length > 0;
+  empty.textContent = all.length
+    ? 'Nothing here.'
+    : 'Nothing tracked yet. Add a project, or set up a machine to report itself.';
+}
+
+async function load() {
+  try {
+    const data = await api('api/entries');
+    state.entries = data.entries; state.info = data.info;
+    render();
+  } catch (err) {
+    $('#summary').textContent = 'Could not load: ' + err.message;
+  }
+}
+
+// ---- Add / edit ----
+const form = $('#entry-form');
+function syncLatest() { $('#latest-wrap').hidden = form.url.value.trim() !== ''; }
+form.url.addEventListener('input', syncLatest);
+
+function openEntry(e) {
+  state.editing = e ? e.id : null;
+  $('#entry-title').textContent = e ? 'Edit ' + e.name : 'Add project';
+  form.name.value = e ? e.name : '';
+  form.current.value = e ? e.current : '';
+  form.url.value = e ? e.url : '';
+  form.latest.value = e ? (e.latest_manual || '') : '';
+  form.picture.value = e ? (e.picture || '') : '';
+  $('#entry-error').textContent = '';
+  syncLatest();
+  $('#dlg-entry').showModal();
+  form.name.focus();
+}
+
+form.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const body = Object.fromEntries(new FormData(form));
+  const btn = $('#entry-save'); btn.disabled = true;
+  try {
+    if (state.editing) await api('api/entries/' + encodeURIComponent(state.editing), { method: 'PUT', body: JSON.stringify(body) });
+    else await api('api/entries', { method: 'POST', body: JSON.stringify(body) });
+    $('#dlg-entry').close();
+    toast(state.editing ? 'Saved' : 'Added — checking for the latest version');
+    await load(); setTimeout(load, 3000);
+  } catch (err) {
+    $('#entry-error').textContent = err.message;
+  } finally { btn.disabled = false; }
+});
+
+// ---- Row actions ----
+$('#rows').addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-action]'); if (!b) return;
+  const e = state.entries.find(x => x.id === b.dataset.id); if (!e) return;
+  const path = 'api/entries/' + encodeURIComponent(e.id);
+  try {
+    if (b.dataset.action === 'edit') return openEntry(e);
+    if (b.dataset.action === 'check') { await api(path + '/check', { method: 'POST' }); toast('Checking ' + e.name + '…'); setTimeout(load, 2500); return; }
+    if (b.dataset.action === 'mark') { await api(path + '/mark-updated', { method: 'POST' }); toast(e.name + ' marked as updated'); return load(); }
+    if (b.dataset.action === 'delete') {
+      const msg = e.source === 'mqtt'
+        ? `Remove ${e.name}? It comes back the next time the machine reports, unless you stop its vt-agent cron job.`
+        : `Delete ${e.name}? It is also removed from Home Assistant.`;
+      if (!confirm(msg)) return;
+      await api(path, { method: 'DELETE' }); toast('Removed ' + e.name); return load();
+    }
+  } catch (err) { toast(err.message); }
+});
+
+$('#tabs').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-filter]'); if (!b) return;
+  state.filter = b.dataset.filter; render();
+});
+
+$('#btn-add').addEventListener('click', () => openEntry(null));
+$('#btn-check').addEventListener('click', async () => {
+  try { await api('api/check', { method: 'POST' }); toast('Checking all projects…'); [2500, 6000, 12000].forEach(t => setTimeout(load, t)); }
+  catch (err) { toast(err.message); }
+});
+
+// ---- Machine setup ----
+let agentLoaded = false;
+$('#btn-machine').addEventListener('click', async () => {
+  const i = state.info || {};
+  $('#mqtt-dot').className = 'dot ' + (i.mqtt_connected ? 'on' : 'off');
+  $('#mqtt-text').textContent = i.mqtt_connected
+    ? `The add-on is connected to MQTT (${i.broker}). Machines publish to ${i.report_topic}.`
+    : 'The add-on is not connected to MQTT yet — machines can report, but nothing will show until it connects.';
+  $('#stale-note').textContent = `A machine that hasn't reported for ${i.stale_hours} hours is flagged as "Not reporting", in this list and in Home Assistant.`;
+  $('#dlg-machine').showModal();
+  if (!agentLoaded) {
+    try {
+      const [a, c] = await Promise.all([fetch('api/agent').then(r => r.text()), fetch('api/agent-conf').then(r => r.text())]);
+      $('#agent-code').textContent = a; $('#conf-code').textContent = c; agentLoaded = true;
+    } catch (err) { $('#agent-code').textContent = 'Could not load: ' + err.message; }
+  }
+});
+
+document.addEventListener('click', async ev => {
+  if (ev.target.matches('[data-close]')) ev.target.closest('dialog').close();
+  const c = ev.target.closest('[data-copy]'); if (!c) return;
+  const text = document.getElementById(c.dataset.copy).textContent;
+  try { await navigator.clipboard.writeText(text); }
+  catch {  // clipboard API can be blocked inside the Home Assistant frame
+    const ta = Object.assign(document.createElement('textarea'), { value: text });
+    document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  toast('Copied');
+});
+
+load();
+setInterval(() => { if (!document.querySelector('dialog[open]')) load(); }, 20000);
+</script>
+</body>
+</html>

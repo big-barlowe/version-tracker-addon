@@ -1,0 +1,25 @@
+configuration:
+  check_interval_hours:
+    name: Check interval (hours)
+    description: How often to look up the latest release of each GitHub/GitLab project.
+  stale_hours:
+    name: Flag machines after (hours)
+    description: A machine that hasn't reported for this long shows as "Not reporting", in the add-on and in Settings → Updates.
+  github_token:
+    name: GitHub token
+    description: Optional. A read-only token raises GitHub's limit from 60 to 5,000 checks an hour.
+  gitlab_tokens:
+    name: GitLab tokens
+    description: Optional, for private projects. One entry per server, e.g. host gitlab.com and a token with the read_api scope. Each token is only sent to its own server.
+  discovery_prefix:
+    name: MQTT discovery prefix
+    description: Leave as homeassistant unless you changed it in the MQTT integration.
+  mqtt_host:
+    name: MQTT broker host
+    description: Only needed if you don't use the Mosquitto broker add-on.
+  mqtt_port:
+    name: MQTT broker port
+  mqtt_username:
+    name: MQTT username
+  mqtt_password:
+    name: MQTT password

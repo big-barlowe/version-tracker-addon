@@ -130,6 +130,21 @@ The script refreshes the package lists itself, at most every `REFRESH_HOURS`
     "Jellyfin|$(jellyfin --version 2>/dev/null | awk '{print $NF}')|https://github.com/jellyfin/jellyfin"
   )
   ```
+- **Packages** listed in the settings file, as `"package"` or
+  `"package|Name"`. Each shows as its own item, with the installed version
+  from dpkg and the latest from apt (the candidate in this machine's own
+  repositories), so it works for anything installed through apt. For example,
+  on a Debian machine running Proxmox Backup Server:
+
+  ```bash
+  PACKAGES=(
+    "proxmox-backup-server|Proxmox Backup Server"
+  )
+  ```
+
+  A package that isn't installed is skipped; take it out of the list and the
+  next report removes its item. Its update also still counts among the
+  system's waiting packages.
 
 ### Updating the agent
 

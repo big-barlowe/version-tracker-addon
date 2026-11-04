@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("VT_DATA_DIR", "/data")
 OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")
@@ -446,7 +446,8 @@ def lookup_logo(link, opts):
 # What's set on the page for an entry (notes; for reported entries also a
 # picture and link) is kept in Settings and laid over it by Tracker.merged().
 
-KIND_LABELS = {"proxmox": "Proxmox", "debian": "Debian", "ubuntu": "Ubuntu", "docker": "Docker", "app": "App"}
+KIND_LABELS = {"proxmox": "Proxmox", "debian": "Debian", "ubuntu": "Ubuntu", "docker": "Docker", "app": "App",
+               "package": "Package"}
 KIND_ICONS = {"proxmox": "proxmox", "docker": "docker", "debian": "debian-linux", "ubuntu": "ubuntu-linux"}
 
 
@@ -457,6 +458,11 @@ def effective_latest(e):
 def generic_picture(e):
     if e.get("source") != "mqtt":
         return ""
+    if e.get("kind") == "package":
+        pkg = e.get("package") or ""
+        icon = ("proxmox-backup-server" if pkg.startswith("proxmox-backup") else
+                "proxmox" if pkg.startswith(("proxmox-", "pve-")) else KIND_ICONS.get(e.get("os") or "", "linux"))
+        return ICON_CDN + icon + ".webp"
     icon = KIND_ICONS.get(e.get("kind") or "") or ("linux" if is_system(e) else "")
     return ICON_CDN + icon + ".webp" if icon else ""
 
@@ -517,6 +523,8 @@ def evaluate(e, opts):
         status = "Not reporting"
     elif e.get("url") and not latest and not e.get("latest_manual"):
         status = "Error" if e.get("error") else "Checking"
+    elif latest and e.get("kind") == "package":
+        status = "Up to date" if latest == current else "Update available"  # the agent asked apt which is newer
     elif latest:
         status = status_for(current, latest)
         by_date = built_after_release(e, latest)
@@ -535,7 +543,8 @@ def evaluate(e, opts):
     if status == "Not reporting":
         ha_latest = (current or "?") + " (not reporting)"
     elif status == "Update available":
-        newer = latest and compare_versions(current, latest) != 0 and clean_tag(latest) != clean_tag(current)
+        newer = latest and clean_tag(latest) != clean_tag(current) and (
+            e.get("kind") == "package" or compare_versions(current, latest) != 0)
         ha_latest = latest if newer else current
         if pending:
             ha_latest += " (+%d package%s)" % (pending, "" if pending == 1 else "s")
@@ -968,6 +977,7 @@ class Tracker:
                  picture=str(data.get("picture") or ""), release_url=str(data.get("release_url") or ""),
                  summary=str(data.get("summary") or ""), last_seen=now_ts(), url_guessed=bool(guessed),
                  image=image, image_created=str(data.get("image_created") or ""),
+                 package=str(data.get("package") or ""), os=str(data.get("os") or ""),
                  agent_version=str(data.get("agent_version") or ""))
         self.store.put(e)
         self.publish_entry(e)
@@ -1208,7 +1218,7 @@ class Tracker:
                 "picture": picture_for(e), "fallback_picture": generic_picture(e),
                 "picture_manual": o.get("picture", "") if e.get("source") == "mqtt" else e.get("picture") or "",
                 "url_manual": o.get("url", ""), "url_guessed": bool(e.get("url_guessed")), "notes": e.get("notes") or "",
-                "image": e.get("image") or "", "image_created": e.get("image_created") or "", "by_date": bool(ev["by_date"]),
+                "image": e.get("image") or "", "package": e.get("package") or "", "image_created": e.get("image_created") or "", "by_date": bool(ev["by_date"]),
                 "is_system": is_system(e), "agent_version": e.get("agent_version") or "",
                 "ignored": self.settings.is_ignored(e["id"]), "pinned": bool(ev["pinned"]),
                 "latest_manual": e.get("latest_manual") if e.get("source") == "project" else "",

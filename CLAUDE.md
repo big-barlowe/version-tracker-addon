@@ -42,7 +42,9 @@ version_tracker/
   for `check_interval_hours`.
 - **Machines** (`source: "mqtt"`) publish retained JSON to
   `version_tracker/report/<machine>/<item>`. Items are `system` (apt /
-  Proxmox), `docker_<name>` and `app_<name>`. If a report has a `project_url`
+  Proxmox), `docker_<name>`, `app_<name>` and `pkg_<package>` (`PACKAGES`;
+  latest is apt's candidate, only sent when `dpkg --compare-versions` says
+  it's newer, so `evaluate()` trusts it instead of `compare_versions`). If a report has a `project_url`
   and no `latest_version`, the add-on looks up the latest release itself. An
   empty retained payload removes the item.
 - **Containers:** the agent reports every running container (`image`,
@@ -150,6 +152,11 @@ pgvector, metube, portainer-ce, ddns-updater, immich postgres), reported by
 the agent through the Docker socket: link guessing, failed-guess drop,
 date-based status, overrides kept through re-report and clear + re-report,
 notes and pictures in HA attributes, GUI screenshots.
+
+1.4.0 (`PACKAGES`): agent in an amd64 `debian:12` container with Proxmox's
+real pbs-client repo, `proxmox-backup-client` 3.4.6-1 installed and 3.4.7-1
+available; not-installed package skipped, removed entry cleared, pin then
+upgrade, epoch/revision-only bump sent to HA. Not yet run on a real PBS host.
 
 1.3.0 (pinning), add-on against Mosquitto in Docker: pin/unpin through the
 API on a container, a Proxmox host with pending packages and a project;

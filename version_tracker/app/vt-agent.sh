@@ -9,6 +9,7 @@
 #     image was built; the add-on finds the project from the image's labels
 #     or its name, and looks up the latest release
 #   * any apps you list in APPS in the settings file
+#   * any packages you list in PACKAGES, with apt's latest version
 #
 # Settings:  /etc/version-tracker.conf   (or: VT_CONF=/path/to/file vt-agent)
 # Usage:     vt-agent             report now
@@ -16,7 +17,7 @@
 
 set -u
 export LC_ALL=C
-AGENT_VERSION="1.2.0"
+AGENT_VERSION="1.4.0"
 
 DRY=0
 case "${1:-}" in
@@ -27,7 +28,7 @@ esac
 CONF="${VT_CONF:-/etc/version-tracker.conf}"
 BROKER=""; PORT=1883; MQTT_USER=""; MQTT_PASS=""
 MACHINE="$(hostname -s)"; PICTURE=""; REFRESH_HOURS=6; DOCKER=auto
-TOPIC_BASE="version_tracker"; APPS=()
+TOPIC_BASE="version_tracker"; APPS=(); PACKAGES=()
 STATE_DIR="${VT_STATE_DIR:-/var/lib/version-tracker}"
 
 if [ -r "$CONF" ]; then
@@ -129,6 +130,27 @@ for app in "${APPS[@]}"; do
   fi
   publish "$item" "{\"machine\":$(json "$MACHINE"),\"name\":$(json "$a_name"),\"kind\":\"app\",\
 \"installed_version\":$(json "$a_ver"),\"project_url\":$(json "$a_url")}"
+done
+
+# ---------------------------------------------------------------------------
+# Packages listed in the settings file:  "package" or "package|Name"
+#   The latest version is apt's candidate, so it comes from this machine's
+#   own repositories (e.g. the Proxmox Backup Server repo).
+# ---------------------------------------------------------------------------
+for pkg in "${PACKAGES[@]}"; do
+  IFS='|' read -r p_pkg p_name <<< "$pkg"
+  [ -n "$p_pkg" ] || continue
+  p_ver="$(dpkg-query -W -f='${Status}|${Version}' "$p_pkg" 2>/dev/null)"
+  case "$p_ver" in
+    *"ok installed|"*) p_ver="${p_ver#*|}" ;;
+    *) echo "vt-agent: package $p_pkg isn't installed, skipping it" >&2; continue ;;
+  esac
+  p_latest="$(apt-cache policy "$p_pkg" 2>/dev/null | awk '/Candidate:/{print $2}')"
+  case "$p_latest" in ""|"(none)") p_latest="$p_ver" ;; esac
+  dpkg --compare-versions "$p_latest" gt "$p_ver" || p_latest="$p_ver"
+  publish "pkg_$(slugify "$p_pkg")" "{\"machine\":$(json "$MACHINE"),\"name\":$(json "${p_name:-$p_pkg}"),\
+\"kind\":\"package\",\"package\":$(json "$p_pkg"),\"os\":$(json "$os_id"),\
+\"installed_version\":$(json "$p_ver"),\"latest_version\":$(json "$p_latest")}"
 done
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0
+
+- Report chosen apt packages as their own items with the new `PACKAGES`
+  setting, e.g. `PACKAGES=("proxmox-backup-server|Proxmox Backup Server")`.
+  The latest version comes from apt, so it works for anything in the
+  machine's repositories. Agent 1.4.0: re-run the install script, then add
+  the line to `/etc/version-tracker.conf`.
+
 ## 1.3.0
 
 - Pin an item at its installed version with the pin on its row. While it

@@ -19,6 +19,13 @@ REFRESH_HOURS=6
 # Report running Docker containers: auto (when Docker is installed), or 0 to turn off.
 DOCKER=auto
 
+# Packages to show as their own items, as "package" or "package|Name".
+# The latest version comes from apt, so it works for anything in this
+# machine's repositories.
+#PACKAGES=(
+#  "proxmox-backup-server|Proxmox Backup Server"
+#)
+
 # Other apps on this machine, as "Name|installed version|GitHub or GitLab link".
 # The add-on looks up the latest release for you.
 #APPS=(

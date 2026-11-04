@@ -329,7 +329,7 @@ function renderTabs() {
 function row(e) {
   const isSystem = e.source === 'mqtt' && e.name === e.machine;
   const sub = e.source === 'mqtt'
-    ? (isSystem ? (e.kind ? e.source_label + ' host' : 'Machine') : 'on ' + e.machine + (e.image ? ' · ' + e.image : ''))
+    ? (isSystem ? (e.kind ? e.source_label + ' host' : 'Machine') : 'on ' + e.machine + (e.image ? ' · ' + e.image : '') + (e.package && e.package !== e.name ? ' · ' + e.package : ''))
     : (e.project_web ? e.project_web.replace(/^https?:\/\//, '') : 'Tracked by hand');
   const letter = esc((e.name || '?')[0].toUpperCase());
   const pic = safeUrl(e.picture)
@@ -441,7 +441,7 @@ function openEntry(e) {
     : 'It shows up in Home Assistant under Settings → Updates whenever a newer version exists.';
   $('#name-wrap').hidden = $('#current-wrap').hidden = reported;
   form.name.required = !reported;
-  $('#url-wrap').hidden = reported && e.is_system;
+  $('#url-wrap').hidden = reported && (e.is_system || e.kind === 'package');  // apt gives their latest version
   $('#url-hint').textContent = !reported
     ? 'GitHub or GitLab (self-hosted works too). Leave blank to track something by hand.'
     : 'Where its releases come from. Leave blank to use ' + (e.url_manual || !e.url ? 'what the machine reports.'
